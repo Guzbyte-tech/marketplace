@@ -18,6 +18,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { config } from "./config";
 import { signWithFreighter } from "./freighter";
+import { mapSorobanErrorMessage } from "./errors";
 
 // ── Types mirrored from the Rust contract ────────────────────
 
@@ -88,6 +89,11 @@ export async function invokeContract(
   readonly = false,
   contractId: string = config.contractId
 ): Promise<xdr.ScVal> {
+  const readableError = (raw: string, fallback: string): Error => {
+    const mapped = mapSorobanErrorMessage(raw);
+    return new Error(mapped ?? fallback);
+  };
+
   const rpc = getRpc();
   const contract = getContract(contractId);
 
@@ -106,7 +112,8 @@ export async function invokeContract(
   const simResult = await rpc.simulateTransaction(tx);
 
   if (SorobanRpc.Api.isSimulationError(simResult)) {
-    throw new Error(`Simulation failed: ${simResult.error}`);
+    const raw = String(simResult.error ?? "");
+    throw readableError(raw, "Unable to simulate this transaction.");
   }
 
   if (readonly) {
@@ -130,7 +137,8 @@ export async function invokeContract(
   );
 
   if (submitted.status === "ERROR") {
-    throw new Error(`Transaction submission failed: ${submitted.errorResult}`);
+    const raw = String(submitted.errorResult ?? "");
+    throw readableError(raw, "Transaction submission failed.");
   }
 
   // Poll for completion.
@@ -143,7 +151,8 @@ export async function invokeContract(
   }
 
   if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-    throw new Error("Transaction failed on-chain.");
+    const raw = JSON.stringify(getResult);
+    throw readableError(raw, "Transaction failed on-chain. Please try again.");
   }
 
   const successResult =
