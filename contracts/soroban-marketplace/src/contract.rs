@@ -652,11 +652,7 @@ impl MarketplaceContract {
         if amount <= 0 {
             panic_with_error!(&env, MarketplaceError::InsufficientOfferAmount);
         }
-        TokenClient::new(&env, &token).transfer(
-            &offerer,
-            &env.current_contract_address(),
-            &amount,
-        );
+        TokenClient::new(&env, &token).transfer(&offerer, &env.current_contract_address(), &amount);
         let offer_id = increment_offer_count(&env);
         save_offer(
             &env,

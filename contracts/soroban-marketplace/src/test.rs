@@ -1,7 +1,10 @@
 use super::*;
 use crate::types::{ListingStatus, OfferStatus, Recipient};
 use soroban_sdk::{
-    bytes, symbol_short, testutils::Address as _, testutils::Events as _, testutils::Ledger,
+    bytes, symbol_short,
+    testutils::Address as _,
+    testutils::Events as _,
+    testutils::Ledger,
     token::{StellarAssetClient, TokenClient},
     vec, Address, Env,
 };
@@ -82,7 +85,10 @@ fn test_set_treasury_and_protocol_fee() {
     // Seller should get 9_500_000, treasury gets 500_000
     let token = TokenClient::new(&env, &token_id);
     assert_eq!(token.balance(&treasury), 500_000_i128);
-    assert_eq!(token.balance(&artist), 100_000_000_000_i128 + 9_500_000_i128);
+    assert_eq!(
+        token.balance(&artist),
+        100_000_000_000_i128 + 9_500_000_i128
+    );
 }
 
 #[test]
@@ -386,14 +392,7 @@ fn test_update_listing_wrong_artist() {
 
     let new_cid = bytes!(&env, 0x51);
     let new_rec = valid_recipients(&env, &artist);
-    client.update_listing(
-        &buyer,
-        &id,
-        &new_cid,
-        &10_000_000_i128,
-        &token_id,
-        &new_rec,
-    );
+    client.update_listing(&buyer, &id, &new_cid, &10_000_000_i128, &token_id, &new_rec);
 }
 
 #[test]
@@ -785,10 +784,7 @@ fn test_royalty_zero_percent() {
     assert_eq!(listing.owner, Some(buyer.clone()));
     // All funds to seller
     let token = TokenClient::new(&env, &token_id);
-    assert_eq!(
-        token.balance(&artist),
-        100_000_000_000_i128 + price
-    );
+    assert_eq!(token.balance(&artist), 100_000_000_000_i128 + price);
 }
 
 #[test]
@@ -873,7 +869,13 @@ fn test_royalty_secondary_sale() {
     listing.status = ListingStatus::Active;
     listing.owner = None;
     // Update recipients to the new seller (buyer) so payout goes to them
-    listing.recipients = vec![&env, Recipient { address: buyer.clone(), percentage: 100 }];
+    listing.recipients = vec![
+        &env,
+        Recipient {
+            address: buyer.clone(),
+            percentage: 100,
+        },
+    ];
     // Save the relisted artwork using contract context
     env.as_contract(&contract_id, || {
         crate::storage::save_listing(&env, &listing);
@@ -886,7 +888,10 @@ fn test_royalty_secondary_sale() {
     // 10% of price should go to original creator (artist), 90% to seller (buyer)
     let token = TokenClient::new(&env, &token_id);
     let royalty = price * 1000 / 10_000; // = 1_000_000
-    assert_eq!(token.balance(&artist), 100_000_000_000_i128 + price + royalty);
+    assert_eq!(
+        token.balance(&artist),
+        100_000_000_000_i128 + price + royalty
+    );
     assert_eq!(
         token.balance(&buyer),
         100_000_000_000_i128 - price + (price - royalty)
@@ -1220,7 +1225,10 @@ fn test_accept_offer_success() {
 
     // Artist should have received the offer amount
     let token = TokenClient::new(&env, &token_id);
-    assert_eq!(token.balance(&artist), 100_000_000_000_i128 + 5_000_000_i128);
+    assert_eq!(
+        token.balance(&artist),
+        100_000_000_000_i128 + 5_000_000_i128
+    );
 }
 
 #[test]
@@ -1473,11 +1481,26 @@ fn test_update_listing_too_many_recipients_fails() {
     let id = create_test_listing(&env, &client, &artist, &token_id);
     let too_many = vec![
         &env,
-        Recipient { address: Address::generate(&env), percentage: 20 },
-        Recipient { address: Address::generate(&env), percentage: 20 },
-        Recipient { address: Address::generate(&env), percentage: 20 },
-        Recipient { address: Address::generate(&env), percentage: 20 },
-        Recipient { address: Address::generate(&env), percentage: 20 },
+        Recipient {
+            address: Address::generate(&env),
+            percentage: 20,
+        },
+        Recipient {
+            address: Address::generate(&env),
+            percentage: 20,
+        },
+        Recipient {
+            address: Address::generate(&env),
+            percentage: 20,
+        },
+        Recipient {
+            address: Address::generate(&env),
+            percentage: 20,
+        },
+        Recipient {
+            address: Address::generate(&env),
+            percentage: 20,
+        },
     ];
     client.update_listing(
         &artist,
@@ -1818,7 +1841,13 @@ fn test_buy_artwork_pays_royalty_on_secondary_sale() {
     listing.artist = buyer.clone();
     listing.status = ListingStatus::Active;
     listing.owner = None;
-    listing.recipients = vec![&env, Recipient { address: buyer.clone(), percentage: 100 }];
+    listing.recipients = vec![
+        &env,
+        Recipient {
+            address: buyer.clone(),
+            percentage: 100,
+        },
+    ];
     env.as_contract(&contract_id, || {
         crate::storage::save_listing(&env, &listing);
     });
@@ -1831,7 +1860,10 @@ fn test_buy_artwork_pays_royalty_on_secondary_sale() {
 
     let expected_royalty = price * royalty_bps as i128 / 10_000; // 1_000_000
     assert_eq!(token.balance(&artist), artist_before + expected_royalty);
-    assert_eq!(token.balance(&buyer), buyer_before + price - expected_royalty);
+    assert_eq!(
+        token.balance(&buyer),
+        buyer_before + price - expected_royalty
+    );
 }
 
 #[test]
@@ -2092,7 +2124,9 @@ fn test_finalize_already_finalized_auction_fails() {
         &valid_recipients(&env, &artist),
     );
     client.place_bid(&bidder, &auction_id, &2_000_000_i128);
-    env.ledger().with_mut(|l| { l.timestamp += 7200; });
+    env.ledger().with_mut(|l| {
+        l.timestamp += 7200;
+    });
     client.finalize_auction(&bidder, &auction_id);
     // Second finalize should fail
     client.finalize_auction(&bidder, &auction_id);
@@ -2114,7 +2148,9 @@ fn test_bid_on_finalized_auction_fails() {
         &valid_recipients(&env, &artist),
     );
     client.place_bid(&bidder, &auction_id, &2_000_000_i128);
-    env.ledger().with_mut(|l| { l.timestamp += 7200; });
+    env.ledger().with_mut(|l| {
+        l.timestamp += 7200;
+    });
     client.finalize_auction(&bidder, &auction_id);
     // Bid after finalization: auction status is no longer Active
     let new_bidder = Address::generate(&env);

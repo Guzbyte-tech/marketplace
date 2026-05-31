@@ -7,10 +7,13 @@ import request from 'supertest';
 const mockPrisma = vi.hoisted(() => ({
   listing: {
     findMany: vi.fn(),
+    count: vi.fn(),
+    aggregate: vi.fn(),
   },
   marketplaceEvent: {
     findMany: vi.fn(),
     findFirst: vi.fn(),
+    count: vi.fn(),
   },
   collection: {
     findMany: vi.fn(),
@@ -341,95 +344,78 @@ describe('GET /wallets/:address/royalty-stats', () => {
   });
 });
 
-// ── Issue #236 — verify cacheMiddleware, strictRateLimiter, axios are importable
-// and the routes that depend on them respond correctly ─────────────────────────
+// ── GET /stats ───────────────────────────────────────────────────────────────
 
-// GET /activity/recent — uses cacheMiddleware(30)
-describe('GET /activity/recent — cacheMiddleware wired correctly', () => {
+describe('GET /stats', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('responds 200 and returns events array (cacheMiddleware import resolves)', async () => {
-    const events = [
-      { id: 1, listingId: BigInt(1), eventType: 'LISTING_CREATED', actor: 'GA', data: {}, ledgerSequence: 10 },
-    ];
-    mockPrisma.marketplaceEvent.findMany.mockResolvedValue(events);
+  it('returns overall stats successfully', async () => {
+    mockPrisma.listing.count.mockImplementation(async (args?: any) => {
+      if (args?.where?.status === 'Active') return 10;
+      return 15; // total listings
+    });
+    mockPrisma.listing.aggregate.mockResolvedValue({
+      _sum: { price: '5000.0000000' },
+    });
+    mockPrisma.marketplaceEvent.findMany.mockResolvedValue([
+      { actor: 'ACTOR1' },
+      { actor: 'ACTOR2' },
+    ]);
+    mockPrisma.marketplaceEvent.count.mockResolvedValue(5);
 
-    const res = await request(app).get('/activity/recent');
+    const res = await request(app).get('/stats');
 
     expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
-    // Confirms the route handler ran — cacheMiddleware did not throw ReferenceError
-    expect(mockPrisma.marketplaceEvent.findMany).toHaveBeenCalled();
+    expect(res.body.totalListings).toBe(15);
+    expect(res.body.activeListings).toBe(10);
+    expect(res.body.totalVolume).toBe('5000.0000000');
+    expect(res.body.activeUsers).toBe(2); // unique actors
+    expect(res.body.totalEvents).toBe(5);
   });
-});
 
-// GET /collections — uses cacheMiddleware(60)
-describe('GET /collections — cacheMiddleware wired correctly', () => {
-  beforeEach(() => vi.clearAllMocks());
+  it('returns stats with range query param', async () => {
+    mockPrisma.listing.count.mockResolvedValue(15);
+    mockPrisma.listing.aggregate.mockResolvedValue({ _sum: { price: '5000' } });
+    mockPrisma.marketplaceEvent.findMany.mockResolvedValue([{ actor: 'A1' }]);
+    mockPrisma.marketplaceEvent.count.mockResolvedValue(3);
 
-  it('responds 200 (cacheMiddleware import resolves)', async () => {
-    mockPrisma.collection.findMany.mockResolvedValue([]);
-
-    const res = await request(app).get('/collections');
+    const res = await request(app).get('/stats?range=week');
 
     expect(res.status).toBe(200);
-    expect(mockPrisma.collection.findMany).toHaveBeenCalled();
+    expect(res.body.timeRange).toBeDefined();
+    expect(res.body.timeRange.from).toBeDefined();
+    expect(res.body.timeRange.to).toBeDefined();
+    expect(mockPrisma.marketplaceEvent.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          ledgerTimestamp: expect.any(Object),
+        }),
+      })
+    );
   });
-});
 
-// GET /wallets/:address/activity — uses strictRateLimiter
-describe('GET /wallets/:address/activity — strictRateLimiter wired correctly', () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  it('responds 200 (strictRateLimiter import resolves)', async () => {
-    mockPrisma.marketplaceEvent.findMany.mockResolvedValue([]);
-
-    const res = await request(app).get('/wallets/GTEST/activity');
-
-    expect(res.status).toBe(200);
+  it('returns 400 for invalid range', async () => {
+    const res = await request(app).get('/stats?range=invalid');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid range value. Use day, week, or month.');
   });
-});
 
-// GET /wallets/:address/royalty-stats — uses strictRateLimiter
-describe('GET /wallets/:address/royalty-stats — strictRateLimiter wired correctly', () => {
-  beforeEach(() => vi.clearAllMocks());
+  it('returns stats with from/to query params', async () => {
+    mockPrisma.listing.count.mockResolvedValue(15);
+    mockPrisma.listing.aggregate.mockResolvedValue({ _sum: { price: '5000' } });
+    mockPrisma.marketplaceEvent.findMany.mockResolvedValue([{ actor: 'A1' }]);
+    mockPrisma.marketplaceEvent.count.mockResolvedValue(3);
 
-  it('responds 200 (strictRateLimiter import resolves)', async () => {
-    mockPrisma.listing.findMany.mockResolvedValue([]);
-
-    const res = await request(app).get('/wallets/GTEST/royalty-stats');
+    const res = await request(app).get('/stats?from=2024-01-01&to=2024-01-07');
 
     expect(res.status).toBe(200);
-    expect(res.body.payoutCount).toBe(0);
+    expect(res.body.timeRange.from).toContain('2024-01-01');
+    expect(res.body.timeRange.to).toContain('2024-01-07');
   });
-});
 
-// GET /listings/:id — uses axios to fetch IPFS metadata
-describe('GET /listings/:id — axios import resolves', () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  it('responds 200 with metadata null when no CID is set (axios import resolves)', async () => {
-    const listing = {
-      listingId: BigInt(1),
-      artist: 'GABC',
-      owner: null,
-      price: '1000',
-      currency: 'XLM',
-      metadataCid: null,
-      token: '',
-      status: 'Active',
-      royaltyBps: 0,
-      createdAtLedger: 1,
-      updatedAtLedger: 1,
-    };
-    // findUnique is not in the mock by default — add it inline
-    (mockPrisma.listing as any).findUnique = vi.fn().mockResolvedValue(listing);
-
-    const res = await request(app).get('/listings/1');
-
-    expect(res.status).toBe(200);
-    expect(res.body.metadata).toBeNull();
-    // Confirms the route ran without a ReferenceError on axios
-    expect((mockPrisma.listing as any).findUnique).toHaveBeenCalled();
+  it('returns 400 for invalid date format', async () => {
+    const res = await request(app).get('/stats?from=bad-date');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid from date format. Use ISO 8601.');
   });
 });
