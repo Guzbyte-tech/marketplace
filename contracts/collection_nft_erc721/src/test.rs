@@ -121,7 +121,10 @@ fn persistent_ttl_is_extended_on_burn_balance_key() {
 #[test]
 fn name_and_symbol_are_stored_correctly() {
     let (_, client, _, _) = setup();
-    assert_eq!(client.name(), String::from_str(&client.env, "Test Collection 721"));
+    assert_eq!(
+        client.name(),
+        String::from_str(&client.env, "Test Collection 721")
+    );
     assert_eq!(client.symbol(), String::from_str(&client.env, "T721"));
 }
 
@@ -196,7 +199,10 @@ fn mint_sets_owner_and_token_uri() {
 
     let id = client.mint(&alice, &String::from_str(&env, "ipfs://Qm123"));
     assert_eq!(client.owner_of(&id), alice);
-    assert_eq!(client.token_uri(&id), String::from_str(&env, "ipfs://Qm123"));
+    assert_eq!(
+        client.token_uri(&id),
+        String::from_str(&env, "ipfs://Qm123")
+    );
 }
 
 #[test]

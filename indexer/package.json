@@ -10,7 +10,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "migrate:status": "npx prisma migrate status",
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint": "npm run prisma:generate && tsc --noEmit"
   },
   "keywords": [],
   "author": "",

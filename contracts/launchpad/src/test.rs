@@ -792,7 +792,6 @@ fn collections_by_creator_returns_correct_collections() {
     assert_eq!(other_colls.len(), 0);
 }
 
-
 // ── Issue #201: Invalid ED25519 signature and expired voucher tests ───────────
 //
 // Deploy a lazy_721 via the launchpad, then verify the deployed collection
@@ -801,7 +800,7 @@ fn collections_by_creator_returns_correct_collections() {
 // We mirror the MintVoucher / Error types from lazy_mint_erc721 using the same
 // #[contracttype] / #[contracterror] macros so the XDR encoding matches.
 
-use soroban_sdk::{contracterror, contractclient, contracttype};
+use soroban_sdk::{contractclient, contracterror, contracttype};
 
 #[contracttype]
 #[derive(Clone)]

@@ -651,11 +651,7 @@ impl LazyMint1155 {
         // Emit TransferSingle event (ERC-1155 standard) - operator is from for direct transfers
         #[allow(deprecated)]
         env.events().publish(
-            (
-                Symbol::new(env, "TransferSingle"),
-                from.clone(),
-                to.clone(),
-            ),
+            (Symbol::new(env, "TransferSingle"), from.clone(), to.clone()),
             (token_id, amount),
         );
         Ok(())
