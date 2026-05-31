@@ -19,17 +19,14 @@ export interface FreighterAccount {
  * Returns true if the Freighter extension is installed in this browser.
  */
 export async function isFreighterInstalled(): Promise<boolean> {
-  // Check global objects
   if (typeof window !== "undefined") {
     if ((window as any).starlight || (window as any).freighter) {
       return true;
     }
   }
 
-  // Check API
   try {
     const connected = await isConnected();
-    // Some versions return a boolean, some return { isConnected: boolean }
     if (typeof connected === "boolean") return connected;
     if (connected && typeof (connected as any).isConnected === "boolean") {
       return (connected as any).isConnected;
@@ -46,7 +43,6 @@ export async function isFreighterInstalled(): Promise<boolean> {
  * Requests access to Freighter and returns the public key + network.
  */
 export async function connectFreighter(): Promise<FreighterAccount> {
-  // 1. setAllowed
   const allowed = await setAllowed();
   
   // Handle both boolean and { isAllowed: boolean }
@@ -56,22 +52,22 @@ export async function connectFreighter(): Promise<FreighterAccount> {
     throw new Error("Freighter access was denied by the user.");
   }
 
-  // 2. getPublicKey
   const publicKey = await getPublicKey();
-  if (typeof publicKey !== "string") {
+  if (!publicKey || typeof publicKey !== "string") {
     const error = (publicKey as any)?.error;
     throw new Error(error ? `Freighter key error: ${error}` : "Failed to get public key from Freighter");
   }
 
-  // 3. getNetworkDetails
   const networkResult = await getNetworkDetails();
   if (!networkResult || (networkResult as any).error) {
     throw new Error(`Freighter network error: ${(networkResult as any)?.error || "Unknown error"}`);
   }
 
+  const networkPassphrase = (networkResult as any).networkPassphrase ?? (networkResult as any).network_passphrase ?? '';
+
   return {
-    publicKey: publicKey,
-    networkPassphrase: networkResult.networkPassphrase,
+    publicKey,
+    networkPassphrase,
   };
 }
 

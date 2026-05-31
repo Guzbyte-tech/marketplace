@@ -20,10 +20,15 @@ pub enum DataKey {
     Offer(u64),
     ListingOffers(u64),
     OffererOffers(Address),
+    ListingLock(u64),
+    AuctionLock(u64),
+    IsPaused,
+    PendingAdmin,
 }
 
-const LEDGER_TTL_BUMP: u32 = 432_000;
-const LEDGER_TTL_THRESHOLD: u32 = 144_000;
+pub const LEDGER_TTL_BUMP: u32 = 432_000;
+pub const LEDGER_TTL_THRESHOLD: u32 = 144_000;
+pub const REENTRANCY_LOCK_TTL: u32 = 1;
 
 // ── Counter helpers ──────────────────────────────────────────
 
@@ -258,4 +263,79 @@ pub fn set_protocol_fee_bps_storage(env: &Env, bps: u32) {
 
 pub fn get_protocol_fee_bps_storage(env: &Env) -> Option<u32> {
     env.storage().persistent().get(&DataKey::ProtocolFeeBps)
+}
+
+// ── Reentrancy Guards ────────────────────────────────────────
+
+pub fn acquire_listing_lock(env: &Env, listing_id: u64) -> bool {
+    let key = DataKey::ListingLock(listing_id);
+    if env.storage().temporary().has(&key) {
+        return false;
+    }
+    env.storage().temporary().set(&key, &true);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, REENTRANCY_LOCK_TTL, REENTRANCY_LOCK_TTL);
+    true
+}
+
+pub fn release_listing_lock(env: &Env, listing_id: u64) {
+    let key = DataKey::ListingLock(listing_id);
+    env.storage().temporary().remove(&key);
+}
+
+pub fn acquire_auction_lock(env: &Env, auction_id: u64) -> bool {
+    let key = DataKey::AuctionLock(auction_id);
+    if env.storage().temporary().has(&key) {
+        return false;
+    }
+    env.storage().temporary().set(&key, &true);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, REENTRANCY_LOCK_TTL, REENTRANCY_LOCK_TTL);
+    true
+}
+
+pub fn release_auction_lock(env: &Env, auction_id: u64) {
+    let key = DataKey::AuctionLock(auction_id);
+    env.storage().temporary().remove(&key);
+}
+
+// ── Admin transfer helpers ───────────────────────────────────
+
+pub fn set_pending_admin_storage(env: &Env, pending: &Address) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::PendingAdmin, pending);
+    env.storage().persistent().extend_ttl(
+        &DataKey::PendingAdmin,
+        LEDGER_TTL_THRESHOLD,
+        LEDGER_TTL_BUMP,
+    );
+}
+
+pub fn get_pending_admin_storage(env: &Env) -> Option<Address> {
+    env.storage().persistent().get(&DataKey::PendingAdmin)
+}
+
+pub fn clear_pending_admin_storage(env: &Env) {
+    env.storage().persistent().remove(&DataKey::PendingAdmin);
+}
+
+// ── Pause/Unpause Mechanism ──────────────────────────────────
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().persistent().set(&DataKey::IsPaused, &paused);
+    env.storage().persistent().extend_ttl(
+        &DataKey::IsPaused,
+        LEDGER_TTL_THRESHOLD,
+        LEDGER_TTL_BUMP,
+    );
+}
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage()
+        .persistent()
+        .get::<DataKey, bool>(&DataKey::IsPaused)
+        .unwrap_or(false)
 }

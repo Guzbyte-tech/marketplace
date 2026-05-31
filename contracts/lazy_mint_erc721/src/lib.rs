@@ -21,9 +21,12 @@
 #![allow(clippy::too_many_arguments, deprecated)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient,
-    xdr::ToXdr, Address, Bytes, BytesN, Env, String,
+    contract, contracterror, contractimpl, contracttype, symbol_short,
+    token::Client as TokenClient, xdr::ToXdr, Address, Bytes, BytesN, Env, String,
 };
+
+const TTL_THRESHOLD: u32 = 50_000;
+const TTL_BUMP: u32 = 100_000;
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
@@ -40,6 +43,7 @@ pub enum Error {
     VoucherExpired = 7,
     VoucherAlreadyUsed = 8,
     NotCreator = 9,
+    InvalidSignature = 10,
 }
 
 // ─── Data types ───────────────────────────────────────────────────────────────
@@ -67,7 +71,7 @@ pub struct MintVoucher {
 /// Signed digest = sha256(token_id ‖ price ‖ valid_until ‖ uri_hash ‖ currency_xdr)
 /// All integers are big-endian.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Initialized,
     Creator,
@@ -91,6 +95,19 @@ pub enum DataKey {
 
 #[contract]
 pub struct LazyMint721;
+
+impl LazyMint721 {
+    /// Helper function to verify signature — panics on invalid signatures
+    /// (ed25519_verify host function aborts on bad sig)
+    fn verify_signature_or_panic(
+        env: &Env,
+        pubkey: &BytesN<32>,
+        digest: &Bytes,
+        signature: &BytesN<64>,
+    ) {
+        env.crypto().ed25519_verify(pubkey, digest, signature);
+    }
+}
 
 #[contractimpl]
 impl LazyMint721 {
@@ -141,6 +158,7 @@ impl LazyMint721 {
         voucher: MintVoucher,
         signature: BytesN<64>,
     ) -> Result<u64, Error> {
+        Self::extend_instance_ttl(&env);
         buyer.require_auth();
 
         // 1. Expiry check
@@ -173,14 +191,14 @@ impl LazyMint721 {
         }
 
         // 4. Signature verification
-        //    Panics (fails the tx) if the signature does not match.
+        //    Panics on invalid signature (caught by try_redeem as host abort).
         let pubkey: BytesN<32> = env
             .storage()
             .instance()
             .get(&DataKey::CreatorPubkey)
             .ok_or(Error::NotInitialized)?;
         let digest = Self::_voucher_digest(&env, &voucher);
-        env.crypto().ed25519_verify(&pubkey, &digest, &signature);
+        Self::verify_signature_or_panic(&env, &pubkey, &digest, &signature);
 
         // 5. Payment  (skip when price == 0)
         if voucher.price > 0 {
@@ -244,6 +262,7 @@ impl LazyMint721 {
     // ── Transfers ─────────────────────────────────────────────────────────
 
     pub fn transfer(env: Env, from: Address, to: Address, token_id: u64) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         from.require_auth();
         Self::_transfer(&env, &from, &to, token_id)
     }
@@ -255,6 +274,7 @@ impl LazyMint721 {
         to: Address,
         token_id: u64,
     ) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         spender.require_auth();
         Self::_check_approved(&env, &spender, &from, token_id)?;
         env.storage()
@@ -271,6 +291,7 @@ impl LazyMint721 {
         approved: Address,
         token_id: u64,
     ) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         spender.require_auth();
         let owner: Address = env
             .storage()
@@ -295,6 +316,7 @@ impl LazyMint721 {
     }
 
     pub fn set_approval_for_all(env: Env, owner: Address, operator: Address, approved: bool) {
+        Self::extend_instance_ttl(&env);
         owner.require_auth();
         let key = DataKey::ApprovedForAll(owner.clone(), operator.clone());
         env.storage().persistent().set(&key, &approved);
@@ -376,6 +398,7 @@ impl LazyMint721 {
     // ── Admin ─────────────────────────────────────────────────────────────
 
     pub fn transfer_ownership(env: Env, new_creator: Address) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         Self::only_creator(&env)?;
         env.storage()
             .instance()
@@ -384,6 +407,7 @@ impl LazyMint721 {
     }
 
     pub fn update_creator_pubkey(env: Env, new_pubkey: BytesN<32>) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         Self::only_creator(&env)?;
         env.storage()
             .instance()
@@ -392,6 +416,7 @@ impl LazyMint721 {
     }
 
     pub fn update_royalty(env: Env, receiver: Address, bps: u32) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         Self::only_creator(&env)?;
         env.storage()
             .instance()
@@ -401,6 +426,10 @@ impl LazyMint721 {
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
+
+    fn extend_instance_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(TTL_THRESHOLD, TTL_BUMP);
+    }
 
     fn only_creator(env: &Env) -> Result<Address, Error> {
         let creator: Address = env
@@ -451,10 +480,28 @@ impl LazyMint721 {
             .storage()
             .persistent()
             .get(&DataKey::BalanceOf(from.clone()))
+            .unwrap_or(0);
+
+        if from_bal == 0 {
+            return Err(Error::NotOwner);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::BalanceOf(from.clone()), &(from_bal - 1));
+        let from_bal: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BalanceOf(from.clone()))
             .unwrap_or(1);
         env.storage().persistent().set(
             &DataKey::BalanceOf(from.clone()),
             &(from_bal.saturating_sub(1)),
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::BalanceOf(from.clone()),
+            TTL_THRESHOLD,
+            TTL_BUMP,
         );
 
         let to_bal: u64 = env
@@ -472,6 +519,9 @@ impl LazyMint721 {
         env.storage()
             .persistent()
             .set(&DataKey::Owner(token_id), to);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Owner(token_id), TTL_THRESHOLD, TTL_BUMP);
         env.events().publish(
             (symbol_short!("transfer"), from.clone()),
             (to.clone(), token_id),
@@ -505,3 +555,6 @@ impl LazyMint721 {
         Err(Error::NotApproved)
     }
 }
+
+#[cfg(test)]
+mod test;

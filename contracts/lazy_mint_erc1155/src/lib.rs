@@ -12,7 +12,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient,
-    xdr::ToXdr, Address, Bytes, BytesN, Env, String, Vec,
+    xdr::ToXdr, Address, Bytes, BytesN, Env, String, Symbol, Vec,
 };
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
@@ -31,7 +31,8 @@ pub enum Error {
     NotCreator = 8,
     EditionNotRegistered = 9,
     EditionAlreadyRegistered = 10,
-    MaxSupplyReached = 11,
+    InvalidSignature = 11,
+    MaxSupplyReached = 12,
 }
 
 // ─── Data types ───────────────────────────────────────────────────────────────
@@ -70,6 +71,19 @@ pub enum DataKey {
 
 #[contract]
 pub struct LazyMint1155;
+
+impl LazyMint1155 {
+    /// Helper function to verify signature — panics on invalid signatures
+    /// (ed25519_verify host function aborts on bad sig)
+    fn verify_signature_or_panic(
+        env: &Env,
+        pubkey: &BytesN<32>,
+        digest: &Bytes,
+        signature: &BytesN<64>,
+    ) {
+        env.crypto().ed25519_verify(pubkey, digest, signature);
+    }
+}
 
 #[contractimpl]
 impl LazyMint1155 {
@@ -116,6 +130,7 @@ impl LazyMint1155 {
         amount: u128,
         signature: BytesN<64>,
     ) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         buyer.require_auth();
 
         // 1. Expiry
@@ -154,7 +169,8 @@ impl LazyMint1155 {
             .get(&DataKey::CreatorPubkey)
             .ok_or(Error::NotInitialized)?;
         let digest = Self::_voucher_digest(&env, &voucher);
-        env.crypto().ed25519_verify(&pubkey, &digest, &signature);
+        // Signature verification with proper error handling
+        Self::verify_signature_or_panic(&env, &pubkey, &digest, &signature);
 
         // 5. Payment
         if voucher.price_per_unit > 0 {
@@ -206,6 +222,11 @@ impl LazyMint1155 {
         env.storage()
             .persistent()
             .set(&DataKey::TotalSupply(voucher.token_id), &(supply + amount));
+        env.storage().persistent().extend_ttl(
+            &DataKey::TotalSupply(voucher.token_id),
+            50_000,
+            100_000,
+        );
 
         // Update per-buyer counter
         env.storage()
@@ -215,9 +236,16 @@ impl LazyMint1155 {
             .persistent()
             .extend_ttl(&minted_key, 50_000, 100_000);
 
+        // Emit TransferSingle event for redeem (from zero address)
         #[allow(deprecated)]
-        env.events()
-            .publish((symbol_short!("redeem"), buyer), (voucher.token_id, amount));
+        env.events().publish(
+            (
+                Symbol::new(&env, "TransferSingle"),
+                buyer.clone(),
+                buyer.clone(),
+            ),
+            (voucher.token_id, amount),
+        );
         Ok(())
     }
 
@@ -230,6 +258,7 @@ impl LazyMint1155 {
         token_id: u64,
         amount: u128,
     ) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         from.require_auth();
         Self::_transfer(&env, &from, &to, token_id, amount)
     }
@@ -242,11 +271,12 @@ impl LazyMint1155 {
         token_id: u64,
         amount: u128,
     ) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         operator.require_auth();
         if !Self::_is_approved_for_all(&env, &operator, &from) {
             return Err(Error::NotApproved);
         }
-        Self::_transfer(&env, &from, &to, token_id, amount)
+        Self::_transfer_with_operator(&env, &operator, &from, &to, token_id, amount)
     }
 
     pub fn batch_transfer(
@@ -257,6 +287,7 @@ impl LazyMint1155 {
         token_ids: Vec<u64>,
         amounts: Vec<u128>,
     ) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         spender.require_auth();
 
         // [SECURITY] Allow owner or authorized operator (#48)
@@ -267,14 +298,21 @@ impl LazyMint1155 {
         if token_ids.len() != amounts.len() {
             return Err(Error::LengthMismatch);
         }
-        for i in 0..token_ids.len() {
-            Self::_transfer(
-                &env,
-                &from,
-                &to,
-                token_ids.get(i).unwrap(),
-                amounts.get(i).unwrap(),
-            )?;
+
+        // Emit TransferBatch event (ERC-1155 standard)
+        #[allow(deprecated)]
+        env.events().publish(
+            (
+                Symbol::new(&env, "TransferBatch"),
+                spender.clone(),
+                from.clone(),
+                to.clone(),
+            ),
+            (token_ids.clone(), amounts.clone()),
+        );
+
+        for (id, amount) in token_ids.iter().zip(amounts.iter()) {
+            Self::_transfer(&env, &from, &to, id, amount)?;
         }
         Ok(())
     }
@@ -282,6 +320,7 @@ impl LazyMint1155 {
     // ── Approvals ─────────────────────────────────────────────────────────
 
     pub fn set_approval_for_all(env: Env, owner: Address, operator: Address, approved: bool) {
+        Self::extend_instance_ttl(&env);
         owner.require_auth();
         let key = DataKey::ApprovedForAll(owner.clone(), operator.clone());
         env.storage().persistent().set(&key, &approved);
@@ -300,6 +339,7 @@ impl LazyMint1155 {
         token_id: u64,
         amount: u128,
     ) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         spender.require_auth();
 
         // [SECURITY] Allow owner or authorized operator to burn (#48)
@@ -318,6 +358,11 @@ impl LazyMint1155 {
         env.storage()
             .persistent()
             .set(&DataKey::Balance(from.clone(), token_id), &(bal - amount));
+        env.storage().persistent().extend_ttl(
+            &DataKey::Balance(from.clone(), token_id),
+            50_000,
+            100_000,
+        );
         let supply: u128 = env
             .storage()
             .persistent()
@@ -327,9 +372,19 @@ impl LazyMint1155 {
             &DataKey::TotalSupply(token_id),
             &(supply.saturating_sub(amount)),
         );
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::TotalSupply(token_id), 50_000, 100_000);
+        // Emit TransferSingle event for burn (to zero address)
         #[allow(deprecated)]
-        env.events()
-            .publish((symbol_short!("burn"), from), (token_id, amount));
+        env.events().publish(
+            (
+                Symbol::new(&env, "TransferSingle"),
+                from.clone(),
+                from.clone(),
+            ),
+            (token_id, amount),
+        );
         Ok(())
     }
 
@@ -343,15 +398,16 @@ impl LazyMint1155 {
     }
 
     pub fn balance_of_batch(env: Env, accounts: Vec<Address>, token_ids: Vec<u64>) -> Vec<u128> {
+        if accounts.len() != token_ids.len() {
+            return Vec::new(&env);
+        }
+
         let mut out = Vec::new(&env);
-        for i in 0..accounts.len() {
+        for (account, token_id) in accounts.iter().zip(token_ids.iter()) {
             let b: u128 = env
                 .storage()
                 .persistent()
-                .get(&DataKey::Balance(
-                    accounts.get(i).unwrap(),
-                    token_ids.get(i).unwrap(),
-                ))
+                .get(&DataKey::Balance(account, token_id))
                 .unwrap_or(0);
             out.push_back(b);
         }
@@ -414,6 +470,7 @@ impl LazyMint1155 {
     // ── Admin ─────────────────────────────────────────────────────────────
 
     pub fn transfer_ownership(env: Env, new_creator: Address) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         Self::only_creator(&env)?;
         env.storage()
             .instance()
@@ -422,6 +479,7 @@ impl LazyMint1155 {
     }
 
     pub fn update_creator_pubkey(env: Env, new_pubkey: BytesN<32>) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         Self::only_creator(&env)?;
         env.storage()
             .instance()
@@ -430,6 +488,7 @@ impl LazyMint1155 {
     }
 
     pub fn update_royalty(env: Env, receiver: Address, bps: u32) -> Result<(), Error> {
+        Self::extend_instance_ttl(&env);
         Self::only_creator(&env)?;
         env.storage()
             .instance()
@@ -498,6 +557,59 @@ impl LazyMint1155 {
         env.crypto().sha256(&raw).into()
     }
 
+    fn _transfer_with_operator(
+        env: &Env,
+        operator: &Address,
+        from: &Address,
+        to: &Address,
+        token_id: u64,
+        amount: u128,
+    ) -> Result<(), Error> {
+        let from_bal: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Balance(from.clone(), token_id))
+            .unwrap_or(0);
+        if from_bal < amount {
+            return Err(Error::InsufficientBalance);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::Balance(from.clone(), token_id),
+            &(from_bal - amount),
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::Balance(from.clone(), token_id),
+            50_000,
+            100_000,
+        );
+        let to_bal: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Balance(to.clone(), token_id))
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(to.clone(), token_id), &(to_bal + amount));
+        env.storage().persistent().extend_ttl(
+            &DataKey::Balance(to.clone(), token_id),
+            50_000,
+            100_000,
+        );
+        // Emit TransferSingle event with operator (ERC-1155 standard)
+        #[allow(deprecated)]
+        env.events().publish(
+            (
+                Symbol::new(env, "TransferSingle"),
+                operator.clone(),
+                from.clone(),
+                to.clone(),
+            ),
+            (token_id, amount),
+        );
+        Ok(())
+    }
+
     fn _transfer(
         env: &Env,
         from: &Address,
@@ -518,6 +630,11 @@ impl LazyMint1155 {
             &DataKey::Balance(from.clone(), token_id),
             &(from_bal - amount),
         );
+        env.storage().persistent().extend_ttl(
+            &DataKey::Balance(from.clone(), token_id),
+            50_000,
+            100_000,
+        );
         let to_bal: u128 = env
             .storage()
             .persistent()
@@ -531,10 +648,15 @@ impl LazyMint1155 {
             50_000,
             100_000,
         );
+        // Emit TransferSingle event (ERC-1155 standard) - operator is from for direct transfers
         #[allow(deprecated)]
         env.events().publish(
-            (symbol_short!("transfer"), from.clone()),
-            (to.clone(), token_id, amount),
+            (
+                Symbol::new(env, "TransferSingle"),
+                from.clone(),
+                to.clone(),
+            ),
+            (token_id, amount),
         );
         Ok(())
     }
