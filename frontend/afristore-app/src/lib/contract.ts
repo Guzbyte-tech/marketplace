@@ -29,7 +29,6 @@ import {
 import {
   DEFAULT_TOKEN,
   TokenConfig,
-  getNativeTokenConfig,
   getTokenConfigByAddress,
 } from "@/config/tokens";
 import { fetchListings, fetchAuctions } from "./indexer";
@@ -254,7 +253,7 @@ export async function createListing(
     );
   }
 
-  const priceStroops = BigInt(Math.round(price * 10_000_000));
+  const priceStroops = xlmToStroops(price);
   const selectedToken = resolveConfiguredToken(tokenAddress);
 
   // If no recipients provided, default to 100% to the artist
@@ -327,7 +326,7 @@ export async function updateListing(
   newTokenAddress: string,
   newRecipients: Array<{ address: string; percentage: number }> = []
 ): Promise<boolean> {
-  const priceStroops = BigInt(Math.round(newPrice * 10_000_000));
+  const priceStroops = xlmToStroops(newPrice);
   const selectedToken = resolveConfiguredToken(newTokenAddress);
 
   const args: xdr.ScVal[] = [
@@ -465,7 +464,7 @@ export async function makeOffer(
   amountXlm: number,
   tokenAddress: string
 ): Promise<number> {
-  const amountStroops = BigInt(Math.round(amountXlm * 10_000_000));
+  const amountStroops = xlmToStroops(amountXlm);
   const args = [
     new Address(offererPublicKey).toScVal(),
     nativeToScVal(BigInt(listingId), { type: "u64" }),
@@ -534,10 +533,11 @@ export async function createAuction(
   reservePriceXlm: number,
   durationSeconds: number,
   royaltyBps: number = 0,
-  recipients: Array<{ address: string; percentage: number }> = []
+  recipients: Array<{ address: string; percentage: number }> = [],
+  tokenAddress: string = DEFAULT_TOKEN.address
 ): Promise<number> {
-  const reserveStroops = BigInt(Math.round(reservePriceXlm * 10_000_000));
-  const nativeToken = getNativeTokenConfig();
+  const reserveStroops = xlmToStroops(reservePriceXlm);
+  const selectedToken = resolveConfiguredToken(tokenAddress);
 
   const finalRecipients = recipients.length > 0
     ? recipients
@@ -546,7 +546,7 @@ export async function createAuction(
   const args: xdr.ScVal[] = [
     new Address(creatorPublicKey).toScVal(),
     nativeToScVal(Buffer.from(metadataCid, "utf-8"), { type: "bytes" }),
-    new Address(nativeToken.address).toScVal(),
+    new Address(selectedToken.address).toScVal(),
     nativeToScVal(reserveStroops, { type: "i128" }),
     nativeToScVal(BigInt(durationSeconds), { type: "u64" }),
     nativeToScVal(royaltyBps, { type: "u32" }),
@@ -572,7 +572,7 @@ export async function placeBid(
   auctionId: number,
   amountXlm: number
 ): Promise<boolean> {
-  const amountStroops = BigInt(Math.round(amountXlm * 10_000_000));
+  const amountStroops = xlmToStroops(amountXlm);
 
   const args: xdr.ScVal[] = [
     new Address(bidderPublicKey).toScVal(),
@@ -687,9 +687,26 @@ export async function getAllAuctions(): Promise<Auction[]> {
 }
 
 
-/** Convert stroops (i128 bigint) to XLM display string */
 // ── Utils ───────────────────────────────────────────────────
 
+/**
+ * Converts an XLM amount (JS number) to stroops (bigint) using
+ * string-based arithmetic to avoid floating-point precision loss.
+ *
+ * e.g. BigInt(Math.round(0.0000001 * 10_000_000)) === 0n  ← WRONG
+ *      xlmToStroops(0.0000001)                          === 1n  ← CORRECT
+ */
+export function xlmToStroops(xlm: number): bigint {
+  const isNegative = xlm < 0;
+  const abs = Math.abs(xlm);
+  // toFixed(7) gives the correct 7-decimal string without FP drift
+  const [whole, frac = ""] = abs.toFixed(7).split(".");
+  const fracPadded = frac.padEnd(7, "0").slice(0, 7);
+  const result = BigInt(whole) * 10_000_000n + BigInt(fracPadded);
+  return isNegative ? -result : result;
+}
+
+/** Convert stroops (i128 bigint) to XLM display string */
 export function stroopsToXlm(stroops: bigint): string {
   const whole = stroops / 10_000_000n;
   const frac = stroops % 10_000_000n;
