@@ -54,7 +54,7 @@ export function OwnedNFTGallery({ onSelect }: OwnedNFTGalleryProps) {
           </div>
           <h3 className="text-xl font-display font-bold text-white mb-2">No NFTs Found</h3>
           <p className="text-white/50 max-w-sm">
-            It looks like you don't own any NFTs on this network yet, or the indexer hasn't synced them.
+            It looks like you don&apos;t own any NFTs on this network yet, or the indexer hasn&apos;t synced them.
           </p>
         </div>
       ) : (
