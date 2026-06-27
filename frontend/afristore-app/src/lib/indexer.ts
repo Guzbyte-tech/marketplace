@@ -399,8 +399,6 @@ export async function fetchListings(options: {
     console.warn('[indexer] fetchListings:', e instanceof Error ? e.message : e);
     return { listings: [] };
   }
-  if (Array.isArray(raw)) return { listings: raw };
-  return { listings: [] };
 }
 
 /**
