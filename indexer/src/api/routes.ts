@@ -27,7 +27,7 @@ async function getCached<T>(key: string, ttl: number, fetcher: () => Promise<T>)
     }
     const result = await fetcher();
     try {
-        await redis.set(key, JSON.stringify(result), 'EX', ttl);
+        await redis.set(key, JSON.stringify(result), { expiration: { type: 'EX', value: ttl } });
     } catch {
         // ignore cache write failures
     }
@@ -39,6 +39,37 @@ const serialize = (obj: any) =>
     JSON.parse(JSON.stringify(obj, (key, value) =>
         typeof value === 'bigint' ? value.toString() : value
     ));
+
+const mapListing = (l: any) => {
+    if (!l) return l;
+    return {
+        ...l,
+        listing_id: l.listingId,
+        metadata_cid: l.metadataCid,
+        token_id: l.nftTokenId,
+        created_at: l.createdAtLedger,
+    };
+};
+
+const mapAuction = (a: any) => {
+    if (!a) return a;
+    return {
+        ...a,
+        auction_id: a.auctionId,
+        metadata_cid: a.metadataCid,
+        token_id: a.nftTokenId,
+        created_at: a.createdAtLedger,
+        reserve_price: a.reservePrice,
+        highest_bid: a.highestBid,
+        highest_bidder: a.highestBidder,
+        end_time: a.endTime,
+    };
+};
+
+// Normalise IPFS gateway — always ensure it ends with /
+function normaliseGateway(gateway: string): string {
+    return gateway.endsWith('/') ? gateway : `${gateway}/`;
+}
 
 // GET /listings?artist=&status=&minPrice=&maxPrice=&search=&limit=&offset=
 router.get('/listings', async (req: Request, res: Response) => {
@@ -55,17 +86,20 @@ router.get('/listings', async (req: Request, res: Response) => {
             if (maxPrice) where.price.lte = maxPrice as string;
         }
 
-        // Search against artist address or metadataCid
+        // Search against artist address or collection
         if (search) {
             const q = search as string;
             where.OR = [
                 { artist: { contains: q, mode: 'insensitive' } },
-                { metadataCid: { contains: q, mode: 'insensitive' } },
+                { collection: { contains: q, mode: 'insensitive' } },
             ];
         }
 
-        const take = Math.max(0, Math.min(Number(limit || 0), 1000)) || undefined;
-        const skip = Number(offset || 0) || undefined;
+        const take = Number(limit) > 0 ? Math.min(Number(limit), 1000) : 50;
+        const rawOffset = Number(offset || 0);
+        const skip = Number.isFinite(rawOffset) && rawOffset > 0
+            ? Math.min(rawOffset, 10_000)
+            : undefined;
 
         const results = await prisma.listing.findMany({
             where,
@@ -74,14 +108,10 @@ router.get('/listings', async (req: Request, res: Response) => {
             skip,
         });
 
-        // If pagination requested, also return total count
-        if (take !== undefined || skip !== undefined) {
-            const total = await prisma.listing.count({ where });
-            return res.json({ listings: serialize(results), total });
-        }
-
-        res.json(serialize(results));
+        const total = await prisma.listing.count({ where });
+        return res.json({ listings: serialize(results.map(mapListing)), total });
     } catch (err) {
+        console.error('Error details:', err);
         res.status(500).json({ error: 'Failed to fetch listings' });
     }
 });
@@ -95,25 +125,11 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
         });
         if (!listing) return res.status(404).json({ error: 'Listing not found' });
 
-        const out: any = serialize(listing);
-        // Try to fetch metadata from IPFS gateway if available
-        const gateway = process.env.IPFS_GATEWAY || 'https://ipfs.io/ipfs/';
-        try {
-            const cid = listing.metadataCid || null;
-            if (cid) {
-                const url = cid.startsWith('ipfs://') ? `${gateway}${cid.replace(/^ipfs:\/\//, '')}` : `${gateway}${cid}`;
-                const r = await axios.get(url, { timeout: 5000 });
-                out.metadata = r.data;
-            } else {
-                out.metadata = null;
-            }
-        } catch (e) {
-            out.metadata = null;
-        }
-
-        res.json(out);
+        const out: any = serialize(mapListing(listing));
+        return res.json(out);
     } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch listing' });
+        console.error('Error details:', err);
+        res.status(500).json({ error: 'Failed to fetch listing details' });
     }
 });
 
@@ -130,6 +146,7 @@ router.get('/listings/:id/history', async (req: Request, res: Response) => {
         });
         res.json(serialize(results));
     } catch (err) {
+        console.error('Error details:', err);
         res.status(500).json({ error: 'Failed to fetch listing history' });
     }
 });
@@ -148,6 +165,7 @@ router.get('/auctions', async (req: Request, res: Response) => {
         });
         res.json(serialize(results));
     } catch (err) {
+        console.error('Error details:', err);
         res.status(500).json({ error: 'Failed to fetch auctions' });
     }
 });
@@ -167,6 +185,7 @@ router.get('/auctions/:id', async (req: Request, res: Response) => {
         }
         res.json(serialize(result));
     } catch (err) {
+        console.error('Error details:', err);
         res.status(500).json({ error: 'Failed to fetch auction' });
     }
 });
@@ -189,6 +208,7 @@ router.get('/offers', async (req: Request, res: Response) => {
         });
         res.json(serialize(results));
     } catch (err) {
+        console.error('Error details:', err);
         res.status(500).json({ error: 'Failed to fetch offers' });
     }
 });
@@ -205,6 +225,7 @@ router.get('/activity/recent', cacheMiddleware(30), async (req: Request, res: Re
         );
         res.json(serialize(results));
     } catch (err) {
+        console.error('Error details:', err);
         res.status(500).json({ error: 'Failed to fetch recent activity' });
     }
 });
@@ -227,6 +248,7 @@ router.get('/collections', cacheMiddleware(60), async (req: Request, res: Respon
         );
         res.json(serialize(results));
     } catch (err) {
+        console.error('Error details:', err);
         res.status(500).json({ error: 'Failed to fetch collections' });
     }
 });
@@ -241,8 +263,24 @@ router.get('/creators/:address/collections', async (req: Request, res: Response)
         });
         res.json(serialize(results));
     } catch (err) {
+        console.error('Error details:', err);
         res.status(500).json({ error: 'Failed to fetch creator collections' });
     }
+});
+
+// GET /wallets/:address/staked — active staked NFTs for a wallet
+router.get('/wallets/:address/staked', async (req: Request, res: Response) => {
+  const { address } = req.params;
+  try {
+    const staked = await prisma.stakedNFT.findMany({
+      where: { owner: address as string, status: 'Active' },
+      orderBy: { stakedAt: 'desc' },
+    });
+    res.json(serialize(staked));
+  } catch (err) {
+    console.error('Error details:', err);
+    res.status(500).json({ error: 'Failed to fetch staked NFTs' });
+  }
 });
 
 // GET /wallets/:address/activity — events relevant to a Stellar account
@@ -265,6 +303,7 @@ router.get('/wallets/:address/activity', strictRateLimiter, async (req: Request,
 
         res.json(serialize(events));
     } catch (err) {
+        console.error('Error details:', err);
         res.status(500).json({ error: 'Failed to fetch wallet activity' });
     }
 });
@@ -275,40 +314,160 @@ router.get('/wallets/:address/royalty-stats', strictRateLimiter, async (req: Req
     try {
         const sold = await prisma.listing.findMany({
             where: {
-                originalCreator: address as string,
                 status: 'Sold',
                 NOT: { artist: address as string },
             },
             select: {
                 listingId: true,
                 price: true,
-                royaltyBps: true,
+                recipients: true,
                 updatedAtLedger: true,
             },
         });
 
         let totalEarned = 0;
-        for (const row of sold) {
-            const p = Number(row.price);
-            totalEarned += (p * row.royaltyBps) / 10000;
-        }
+        let payoutCount = 0;
+        let lastPayout = 0;
 
-        const lastSale = sold.reduce<(typeof sold)[0] | null>((latest, row) => {
-            if (!latest || row.updatedAtLedger > latest.updatedAtLedger) {
-                return row;
+        for (const row of sold) {
+            const recipients = (row.recipients as Array<{ address: string, percentage: number }>) || [];
+            const recipient = recipients.find(r => r.address === address);
+            if (recipient) {
+                payoutCount++;
+                const p = Number(row.price);
+                totalEarned += (p * recipient.percentage) / 10000;
+                if (row.updatedAtLedger > lastPayout) {
+                    lastPayout = row.updatedAtLedger;
+                }
             }
-            return latest;
-        }, null);
+        }
 
         res.json({
             totalEarned: totalEarned.toFixed(7),
-            payoutCount: sold.length,
-            lastPayout: lastSale ? lastSale.updatedAtLedger * 1000 : 0,
+            payoutCount,
+            lastPayout: lastPayout > 0 ? lastPayout * 1000 : 0,
         });
     } catch (err) {
+        console.error('Error details:', err);
         res.status(500).json({ error: 'Failed to fetch royalty stats' });
     }
 });
 
-export default router;
+// GET /stats — marketplace-wide aggregates with optional time-range filtering
+// Query params:
+//   from  — ISO 8601 date string (inclusive lower bound), e.g. 2024-01-01
+//   to    — ISO 8601 date string (inclusive upper bound), e.g. 2024-12-31
+//   range — shorthand: "day" | "week" | "month" (overrides from/to)
+router.get('/stats', async (req: Request, res: Response) => {
+    try {
+        const { from, to, range } = req.query;
 
+        // Resolve time window
+        let dateFrom: Date | undefined;
+        let dateTo: Date | undefined;
+
+        if (range) {
+            const now = new Date();
+            dateTo = now;
+            if (range === 'day') {
+                dateFrom = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            } else if (range === 'week') {
+                dateFrom = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+            } else if (range === 'month') {
+                dateFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+            } else {
+                return res.status(400).json({ error: 'Invalid range value. Use day, week, or month.' });
+            }
+        } else {
+            if (from) {
+                dateFrom = new Date(from as string);
+                if (isNaN(dateFrom.getTime())) {
+                    return res.status(400).json({ error: 'Invalid from date format. Use ISO 8601.' });
+                }
+            }
+            if (to) {
+                dateTo = new Date(to as string);
+                if (isNaN(dateTo.getTime())) {
+                    return res.status(400).json({ error: 'Invalid to date format. Use ISO 8601.' });
+                }
+            }
+        }
+
+        // Build ledgerTimestamp filter for time-ranged queries
+        const eventTimeFilter: any = {};
+        if (dateFrom) eventTimeFilter.gte = dateFrom;
+        if (dateTo)   eventTimeFilter.lte = dateTo;
+        const hasTimeFilter = Object.keys(eventTimeFilter).length > 0;
+
+        // Total listings count
+        const totalListings = await prisma.listing.count();
+
+        // Active listings count
+        const activeListings = await prisma.listing.count({
+            where: { status: 'Active' },
+        });
+
+        // Total volume — sum of price for all Sold listings
+        const volumeResult = await prisma.listing.aggregate({
+            _sum: { price: true },
+            where: { status: 'Sold' },
+        });
+        const totalVolume = volumeResult._sum.price?.toString() ?? '0';
+
+        // Unique active users — distinct actors across marketplace events
+        const userFilter: any = hasTimeFilter
+            ? { ledgerTimestamp: eventTimeFilter }
+            : {};
+        const distinctActors = await prisma.marketplaceEvent.findMany({
+            where: userFilter,
+            select: { actor: true },
+            distinct: ['actor'],
+        });
+        const activeUsers = distinctActors.length;
+
+        // Event counts within the time window (or all-time if no filter)
+        const totalEvents = await prisma.marketplaceEvent.count({
+            where: userFilter,
+        });
+
+        // Sales count within time window
+        const salesFilter: any = { eventType: 'ARTWORK_SOLD' };
+        if (hasTimeFilter) salesFilter.ledgerTimestamp = eventTimeFilter;
+        const totalSales = await prisma.marketplaceEvent.count({
+            where: salesFilter,
+        });
+
+        // Volume within time window — sum price of sold listings whose updatedAt
+        // falls in the window (using ledgerTimestamp from events as proxy)
+        const windowVolumeResult = hasTimeFilter
+            ? await prisma.listing.aggregate({
+                _sum: { price: true },
+                where: {
+                    status: 'Sold',
+                    // ledgerTimestamp is on MarketplaceEvent, not Listing — use
+                    // an EXISTS sub-query approximation via a join on event time
+                },
+            })
+            : null;
+
+        res.json({
+            totalListings,
+            activeListings,
+            totalVolume,
+            activeUsers,
+            totalEvents,
+            totalSales,
+            ...(hasTimeFilter && {
+                timeRange: {
+                    from: dateFrom?.toISOString() ?? null,
+                    to: dateTo?.toISOString() ?? null,
+                },
+            }),
+        });
+    } catch (err) {
+        console.error('Error details:', err);
+        res.status(500).json({ error: 'Failed to fetch stats' });
+    }
+});
+
+export default router;

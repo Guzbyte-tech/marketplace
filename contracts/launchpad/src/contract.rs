@@ -37,7 +37,6 @@ mod iface {
     use soroban_sdk::{contractclient, Address, BytesN, Env, String};
 
     #[contractclient(name = "Normal721Client")]
-    #[allow(dead_code)]
     pub trait INormal721 {
         fn initialize(
             env: Env,
@@ -51,7 +50,6 @@ mod iface {
     }
 
     #[contractclient(name = "Normal1155Client")]
-    #[allow(dead_code)]
     pub trait INormal1155 {
         fn initialize(
             env: Env,
@@ -63,7 +61,6 @@ mod iface {
     }
 
     #[contractclient(name = "Lazy721Client")]
-    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub trait ILazy721 {
         fn initialize(
@@ -79,7 +76,6 @@ mod iface {
     }
 
     #[contractclient(name = "Lazy1155Client")]
-    #[allow(dead_code)]
     pub trait ILazy1155 {
         fn initialize(
             env: Env,
@@ -90,9 +86,20 @@ mod iface {
             royalty_receiver: Address,
         );
     }
+
+    #[contractclient(name = "NftStakingClient")]
+    pub trait INftStaking {
+        fn init(
+            env: Env,
+            admin: Address,
+            nft_address: Address,
+            reward_token: Address,
+            reward_rate: i128,
+        );
+    }
 }
 
-use iface::{Lazy1155Client, Lazy721Client, Normal1155Client, Normal721Client};
+use iface::{Lazy1155Client, Lazy721Client, NftStakingClient, Normal1155Client, Normal721Client};
 
 // ─── Salt hardening (fix #53) ─────────────────────────────────────────────────
 /// Bind `raw_salt` to the caller so that two different creators can never
@@ -210,7 +217,13 @@ impl Launchpad {
         );
 
         storage::record_collection(&env, &creator, &addr, CollectionKind::Normal721);
-        events::publish_deploy(&env, symbol_short!("n721"), &creator, &addr);
+        events::publish_deploy(
+            &env,
+            symbol_short!("n721"),
+            &creator,
+            &addr,
+            &CollectionKind::Normal721,
+        );
         Ok(addr)
     }
 
@@ -254,7 +267,13 @@ impl Launchpad {
         );
 
         storage::record_collection(&env, &creator, &addr, CollectionKind::Normal1155);
-        events::publish_deploy(&env, symbol_short!("n1155"), &creator, &addr);
+        events::publish_deploy(
+            &env,
+            symbol_short!("n1155"),
+            &creator,
+            &addr,
+            &CollectionKind::Normal1155,
+        );
         Ok(addr)
     }
 
@@ -308,7 +327,13 @@ impl Launchpad {
         );
 
         storage::record_collection(&env, &creator, &addr, CollectionKind::LazyMint721);
-        events::publish_deploy(&env, symbol_short!("l721"), &creator, &addr);
+        events::publish_deploy(
+            &env,
+            symbol_short!("l721"),
+            &creator,
+            &addr,
+            &CollectionKind::LazyMint721,
+        );
         Ok(addr)
     }
 
@@ -354,7 +379,61 @@ impl Launchpad {
         );
 
         storage::record_collection(&env, &creator, &addr, CollectionKind::LazyMint1155);
-        events::publish_deploy(&env, symbol_short!("l1155"), &creator, &addr);
+        events::publish_deploy(
+            &env,
+            symbol_short!("l1155"),
+            &creator,
+            &addr,
+            &CollectionKind::LazyMint1155,
+        );
+        Ok(addr)
+    }
+
+    /// Register the NftStaking WASM hash (upload off-chain first).
+    pub fn set_staking_wasm_hash(env: Env, wasm_staking: BytesN<32>) -> Result<(), Error> {
+        storage::extend_instance_ttl(&env);
+        storage::require_admin(&env)?;
+        storage::set_staking_wasm_hash(&env, &wasm_staking);
+        Ok(())
+    }
+
+    // ── Deploy: Staking pool clone ────────────────────────────────────────
+
+    /// Deploy a dedicated NftStaking clone for an NFT collection.
+    ///
+    /// `salt` — unique 32 bytes per pool; combined with creator for front-run protection.
+    pub fn deploy_staking_pool(
+        env: Env,
+        creator: Address,
+        nft_address: Address,
+        reward_token: Address,
+        reward_rate: i128,
+        salt: BytesN<32>,
+    ) -> Result<Address, Error> {
+        storage::extend_instance_ttl(&env);
+        creator.require_auth();
+
+        if storage::staking_pool_by_nft(&env, &nft_address).is_some() {
+            return Err(Error::StakingPoolAlreadyExists);
+        }
+
+        let wasm = storage::get_staking_wasm_hash(&env).ok_or(Error::WasmHashNotSet)?;
+
+        let secure_salt = make_secure_salt(&env, &creator, &salt);
+        let addr = env
+            .deployer()
+            .with_current_contract(secure_salt)
+            .deploy_v2(wasm, ());
+
+        NftStakingClient::new(&env, &addr).init(
+            &creator,
+            &nft_address,
+            &reward_token,
+            &reward_rate,
+        );
+
+        storage::record_staking_pool(&env, &nft_address, &addr);
+        events::publish_staking_deploy(&env, &creator, &nft_address, &addr);
         Ok(addr)
     }
 
@@ -396,5 +475,38 @@ impl Launchpad {
 
     pub fn platform_fee(env: Env) -> (Address, u32) {
         storage::get_platform_fee(&env)
+    }
+
+    // ── Query API (issue: launchpad contract query API + deploy events) ───
+
+    /// All collections deployed by a specific creator address.
+    /// Callable from frontend and CLI.
+    pub fn get_creator_collections(env: Env, creator: Address) -> Vec<CollectionRecord> {
+        storage::collections_by_creator(&env, &creator)
+    }
+
+    /// Look up a single collection record by its deployed contract address.
+    /// Returns `None` if the address was not deployed through this launchpad.
+    /// Callable from frontend and CLI.
+    pub fn get_collection_by_id(env: Env, address: Address) -> Option<CollectionRecord> {
+        storage::collection_by_address(&env, &address)
+    }
+
+    /// Paginated registry of collections deployed through this launchpad.
+    /// Returns up to `limit` records starting at `start_index`.
+    /// Callable from frontend and CLI.
+    pub fn get_collections(env: Env, start_index: u32, limit: u32) -> Vec<CollectionRecord> {
+        storage::collections_paginated(&env, start_index as u64, limit as u64)
+    }
+
+    /// Total number of collections deployed through this launchpad.
+    /// Callable from frontend and CLI.
+    pub fn get_collection_count(env: Env) -> u64 {
+        storage::collection_count(&env)
+    }
+
+    /// Look up the staking pool clone deployed for an NFT collection address.
+    pub fn get_staking_pool(env: Env, nft_address: Address) -> Option<Address> {
+        storage::staking_pool_by_nft(&env, &nft_address)
     }
 }

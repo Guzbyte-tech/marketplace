@@ -15,9 +15,15 @@ import {
   Auction,
 } from "@/lib/contract";
 import { fetchAuctions } from "@/lib/indexer";
-import { uploadImageToIPFS, uploadMetadataToIPFS, ArtworkMetadata } from "@/lib/ipfs";
+import {
+  uploadImageToIPFS,
+  uploadMetadataToIPFS,
+  ArtworkMetadata,
+} from "@/lib/ipfs";
 import { getReadableErrorMessage } from "@/lib/errors";
 import { useTransientErrorToast } from "./useTransientErrorToast";
+import { assertSupportedTokenAddress } from "@/lib/token-support";
+import { DEFAULT_TOKEN } from "@/config/tokens";
 
 // ── useAuctions ──────────────────────────────────────────────
 
@@ -75,6 +81,16 @@ export function useArtistAuctions(artistPublicKey: string | null) {
     setIsLoading(true);
     setError(null);
     try {
+      try {
+        const raw = await fetchAuctions({ creator: artistPublicKey });
+        if (raw && raw.length >= 0) {
+          setAuctions(raw as Auction[]);
+          return;
+        }
+      } catch (e) {
+        console.warn("[indexer] useArtistAuctions fallback:", e);
+      }
+
       const ids = await getArtistAuctions(artistPublicKey);
       const resolved = await Promise.all(ids.map((id) => getAuction(id)));
       setAuctions(resolved);
@@ -104,6 +120,7 @@ export interface CreateAuctionInput {
   reservePriceXlm: number;
   durationHours: number;
   royaltyBps?: number;
+  tokenAddress?: string;
 }
 
 export function useCreateAuction(creatorPublicKey: string | null) {
@@ -125,7 +142,10 @@ export function useCreateAuction(creatorPublicKey: string | null) {
       try {
         // Step 1: Upload image to IPFS.
         setProgress("Uploading image to IPFS…");
-        const imageResult = await uploadImageToIPFS(input.imageFile, input.title);
+        const imageResult = await uploadImageToIPFS(
+          input.imageFile,
+          input.title,
+        );
 
         // Step 2: Build metadata JSON.
         const metadata: ArtworkMetadata = {
@@ -139,17 +159,26 @@ export function useCreateAuction(creatorPublicKey: string | null) {
 
         // Step 3: Upload metadata to IPFS.
         setProgress("Uploading metadata to IPFS…");
-        const metadataResult = await uploadMetadataToIPFS(metadata, input.title);
+        const metadataResult = await uploadMetadataToIPFS(
+          metadata,
+          input.title,
+        );
 
-        // Step 4: Call the Soroban contract.
+        // Step 4: Validate token and call the Soroban contract.
         setProgress("Creating on-chain auction…");
+        const token = await assertSupportedTokenAddress(
+          input.tokenAddress ?? DEFAULT_TOKEN.address,
+          "auction",
+        );
         const durationSeconds = input.durationHours * 3600;
         const auctionId = await createAuction(
           creatorPublicKey,
           metadataResult.cid,
           input.reservePriceXlm,
           durationSeconds,
-          input.royaltyBps
+          input.royaltyBps,
+          [],
+          token.address,
         );
 
         setProgress("Auction created successfully!");
@@ -161,41 +190,10 @@ export function useCreateAuction(creatorPublicKey: string | null) {
         setIsCreating(false);
       }
     },
-    [creatorPublicKey]
+    [creatorPublicKey],
   );
 
   return { create, isCreating, progress, error };
-}
-
-// ── usePlaceBid ──────────────────────────────────────────────
-
-export function usePlaceBid(bidderPublicKey: string | null) {
-  const [isBidding, setIsBidding] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  useTransientErrorToast(error);
-
-  const bid = useCallback(
-    async (auctionId: number, amountXlm: number): Promise<boolean> => {
-      if (!bidderPublicKey) {
-        setError("Wallet not connected");
-        return false;
-      }
-      setIsBidding(true);
-      setError(null);
-      try {
-        await placeBid(bidderPublicKey, auctionId, amountXlm);
-        return true;
-      } catch (err: unknown) {
-        setError(getReadableErrorMessage(err, "Failed to place bid"));
-        return false;
-      } finally {
-        setIsBidding(false);
-      }
-    },
-    [bidderPublicKey]
-  );
-
-  return { bid, isBidding, error };
 }
 
 // ── useFinalizeAuction ───────────────────────────────────────
@@ -223,7 +221,7 @@ export function useFinalizeAuction(callerPublicKey: string | null) {
         setIsFinalizing(false);
       }
     },
-    [callerPublicKey]
+    [callerPublicKey],
   );
 
   return { finalize, isFinalizing, error };

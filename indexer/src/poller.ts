@@ -1,6 +1,5 @@
-import { rpc, Contract, TransactionBuilder, BASE_FEE, nativeToScVal, scValToNative } from '@stellar/stellar-sdk';
+import { rpc, Contract, TransactionBuilder, BASE_FEE, nativeToScVal, scValToNative, Keypair, Account } from '@stellar/stellar-sdk';
 import prisma from './db.js';
-import { parseMarketplaceEvent } from './parser.js';
 import { emitSSEEvent } from './api/routes.js';
 import dotenv from 'dotenv';
 import {
@@ -8,22 +7,94 @@ import {
   networkLatestLedgerGauge,
   syncLatencyGauge
 } from './metrics.js';
+import { collectMarketplaceEvents, MAX_LEDGER_WINDOW } from './event-sync.js';
+import redis from './redis.js';
 
 dotenv.config();
 
 const RPC_URL = process.env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org';
 const CONTRACT_ID = process.env.MARKETPLACE_CONTRACT_ID || '';
 const LAUNCHPAD_CONTRACT_ID = process.env.LAUNCHPAD_CONTRACT_ID || '';
+const STAKING_CONTRACT_ID = process.env.STAKING_CONTRACT_ID || '';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS || '5000');
 
-// Stellar RPC enforces a maximum getEvents window of 17,280 ledgers (~24 h).
-const MAX_LEDGER_WINDOW = 17_000;
+// Stay this many ledgers behind the network tip to avoid requesting ledgers that
+// are not yet available on every Soroban RPC load balancer node.
+const LEDGER_LAG_BUFFER = 2;
 
 // Retry back-off base in ms; doubles on each consecutive failure up to MAX_BACKOFF_MS.
 const BASE_BACKOFF_MS = 2_000;
 const MAX_BACKOFF_MS = 60_000;
 
 let consecutiveErrors = 0;
+
+// Graceful shutdown coordination
+let shuttingDown = false;
+
+function getContractIds(): string[] {
+  return [CONTRACT_ID, LAUNCHPAD_CONTRACT_ID, STAKING_CONTRACT_ID].filter(Boolean);
+}
+
+function updateSyncMetrics(processedLedger: number, networkLatestLedger: number) {
+  latestLedgerProcessedGauge.set(processedLedger);
+  networkLatestLedgerGauge.set(networkLatestLedger);
+  syncLatencyGauge.set(Math.max(0, networkLatestLedger - processedLedger));
+}
+
+function setupSignalHandlers() {
+  const onSignal = (sig: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Shutdown] Received ${sig} — attempting graceful shutdown`);
+    // Start async cleanup; don't await here since signals may be re-delivered
+    gracefulShutdown().catch((err) => {
+      console.error('[Shutdown] Graceful shutdown failed:', err);
+      process.exit(1);
+    });
+  };
+  process.on('SIGTERM', () => onSignal('SIGTERM'));
+  process.on('SIGINT', () => onSignal('SIGINT'));
+}
+
+async function gracefulShutdown() {
+  console.log('[Shutdown] Closing resources: Prisma + Redis');
+  const cleanup = Promise.allSettled([
+    prisma.$disconnect(),
+    // redis may not be connected in some test environments
+    (redis && typeof redis.disconnect === 'function') ? redis.disconnect() : Promise.resolve(),
+  ]);
+
+  // Timeout fallback: force exit if cleanup hangs
+  try {
+    await Promise.race([
+      cleanup,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('shutdown timeout')), 10000)),
+    ]);
+    console.log('[Shutdown] Cleanup complete, exiting');
+    process.exit(0);
+  } catch (err) {
+    console.error('[Shutdown] Cleanup timed out or errored:', err);
+    process.exit(1);
+  }
+}
+
+// Register handlers immediately so any external SIGTERM/SIGINT will be caught
+setupSignalHandlers();
+
+/**
+ * Returns true when the Soroban RPC signals that the requested ledger range is
+ * outside the node's available window (JSON-RPC error code -32600).  This
+ * happens under load-balancer lag and must NOT trigger a database rollback.
+ */
+function isRpcOutOfBoundsError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as Record<string, unknown>;
+  return (
+    e['code'] === -32600 ||
+    (typeof e['message'] === 'string' &&
+      (e['message'] as string).includes('start ledger must be between'))
+  );
+}
 
 const server = new rpc.Server(RPC_URL);
 
@@ -65,10 +136,22 @@ export async function revertLedgers(safeAtLedger: number): Promise<void> {
   console.log(`[Reorg] Rollback complete. Resuming from ledger ${safeAtLedger + 1}`);
 }
 
+/** SyncState fields for a ledger advance; omits hash when fetch failed so we keep the prior checkpoint. */
+export function buildSyncStateLedgerData(
+  lastLedger: number,
+  ledgerHash: string | null
+): { lastLedger: number; lastLedgerHash?: string } {
+  if (ledgerHash !== null) {
+    return { lastLedger, lastLedgerHash: ledgerHash };
+  }
+  return { lastLedger };
+}
+
 export async function validateHashContinuity(
   syncState: { lastLedger: number; lastLedgerHash: string | null },
   rpcServer: rpc.Server
 ): Promise<boolean> {
+  // No stored hash (initial sync or prior hash fetch failure) — cannot detect re-org.
   if (syncState.lastLedger > 0 && syncState.lastLedgerHash) {
     try {
       const ledgersRes = await rpcServer.getLedgers({
@@ -92,21 +175,22 @@ export async function validateHashContinuity(
 }
 
 export async function startPolling() {
-  if (!CONTRACT_ID && !LAUNCHPAD_CONTRACT_ID) {
+  const contractIds = getContractIds();
+  if (contractIds.length === 0) {
     throw new Error('At least one of MARKETPLACE_CONTRACT_ID or LAUNCHPAD_CONTRACT_ID must be set');
   }
 
-  console.log(`Starting indexer poller for contract: ${CONTRACT_ID}`);
+  console.log(`Starting indexer poller for contract(s): ${contractIds.join(', ')}`);
 
-  while (true) {
+  while (!shuttingDown) {
     try {
-      // 1. Get last indexed ledger
-      let syncState = await prisma.syncState.findUnique({ where: { id: 1 } });
-      if (!syncState) {
-        syncState = await prisma.syncState.create({
-          data: { id: 1, lastLedger: 0, lastLedgerHash: null }
-        });
-      }
+      // 1. Get last indexed ledger — upsert avoids a unique-constraint violation
+      //    when two instances start simultaneously (race between findUnique + create).
+      let syncState = await prisma.syncState.upsert({
+        where: { id: 1 },
+        create: { id: 1, lastLedger: 0, lastLedgerHash: null },
+        update: {},
+      });
 
       // 2. Validate hash continuity on every poll
       const isContinuous = await validateHashContinuity(syncState, server);
@@ -124,71 +208,55 @@ export async function startPolling() {
         throw err;
       }
 
+      networkLatestLedgerGauge.set(networkLatestLedger);
+
+      // Stay a few ledgers behind the tip so all load-balancer nodes have
+      // fully committed these ledgers before we request them.
+      const effectiveLatestLedger = Math.max(0, networkLatestLedger - LEDGER_LAG_BUFFER);
+
+      if (syncState.lastLedger > 0 && effectiveLatestLedger < syncState.lastLedger) {
+        // The RPC appears to be lagging behind our indexed state.  This is a
+        // transient load-balancer condition, NOT a chain re-org — real re-orgs
+        // are detected below via hash comparison.  Skip this poll iteration.
+        console.warn({
+          msg: 'Effective latest ledger behind indexed state — possible RPC lag, skipping poll',
+          indexedLedger: syncState.lastLedger,
+          networkLatestLedger,
+          effectiveLatestLedger,
+        });
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+        continue;
+      }
+
       const windowFloor = networkLatestLedger - MAX_LEDGER_WINDOW;
       let startLedger = syncState.lastLedger + 1;
+      let skippedRange: { from: number; to: number } | null = null;
       if (startLedger < windowFloor) {
+        skippedRange = { from: startLedger, to: windowFloor - 1 };
         console.warn({
-          msg: 'startLedger too old — resetting to safe window floor',
-          requested: startLedger,
+          msg: 'Skipping ledger gap outside the live RPC window',
+          skippedRange,
           windowFloor,
           networkLatest: networkLatestLedger,
         });
         startLedger = windowFloor;
         // Persist the reset so future polls don't re-request the stale range.
-        await prisma.syncState.update({
+        const resetState = await prisma.syncState.update({
           where: { id: 1 },
           data: { lastLedger: windowFloor - 1, lastLedgerHash: null },
         });
+
+        syncState = resetState;
       }
+      const decodedEvents = await collectMarketplaceEvents(server, contractIds, startLedger, effectiveLatestLedger);
 
-      const response = await server.getEvents({
-        startLedger,
-        filters: [
-          {
-            type: 'contract',
-            contractIds: [CONTRACT_ID, LAUNCHPAD_CONTRACT_ID].filter(Boolean),
-          },
-        ],
-      });
-
-      // Re-org detection: if the node's latest ledger has fallen behind what
-      // we already indexed, the node reset or we connected to a different one.
-      if (syncState.lastLedger > 0 && response.latestLedger < syncState.lastLedger) {
-        console.warn(
-          `[Reorg] Network latestLedger ${response.latestLedger} < indexed ${syncState.lastLedger}`
-        );
-        await revertLedgers(response.latestLedger);
-        continue;
-      }
-
-      if (response.events && response.events.length > 0) {
-        console.log(`Found ${response.events.length} new events since ledger ${syncState.lastLedger}`);
-
-        let maxLedger = syncState.lastLedger;
-        const decodedEvents: any[] = [];
-
-        for (const event of response.events) {
-          // Topics in v14 are ScVal, need to convert to strings (symbol or other)
-          const topicStrings = event.topic.map(t => {
-            if (typeof t === 'string') return t;
-            return t.toXDR('base64');
-          });
-
-          const decoded = parseMarketplaceEvent(
-            topicStrings,
-            typeof event.value === 'string' ? event.value : event.value.toXDR('base64'),
-            event.ledger
-          );
-          if (decoded) decodedEvents.push(decoded);
-          if (event.ledger > maxLedger) maxLedger = event.ledger;
-        }
-
-        // Fetch the actual hash for the latest processed ledger
-        let latestHash: string | null = null;
+      let latestHash: string | null = null;
+      if (decodedEvents.length > 0) {
+        const maxLedger = Math.max(...decodedEvents.map((event) => event.ledgerSequence));
         try {
           const ledgersRes = await server.getLedgers({
             startLedger: maxLedger,
-            pagination: { limit: 1 }
+            pagination: { limit: 1 },
           });
           if (ledgersRes.ledgers && ledgersRes.ledgers.length > 0) {
             latestHash = ledgersRes.ledgers[0].hash;
@@ -197,88 +265,56 @@ export async function startPolling() {
           console.error(`Failed to fetch hash for ledger ${maxLedger}:`, err);
         }
 
-    
         const { updatedState, newEvents } = await prisma.$transaction(async (tx) => {
-          const conditions = decodedEvents.map((e) => ({
-            listingId: e.listingId ?? null,
-            eventType: e.eventType,
-            ledgerSequence: e.ledgerSequence,
-          }));
-
-          const existing = conditions.length
-            ? await tx.marketplaceEvent.findMany({ where: { OR: conditions }, select: { listingId: true, eventType: true, ledgerSequence: true } })
-            : [];
-
-          const existingSet = new Set(existing.map((e) => `${e.listingId ?? 'null'}|${e.eventType}|${e.ledgerSequence}`));
-
-          const toInsert = decodedEvents.filter((e) => !existingSet.has(`${e.listingId ?? 'null'}|${e.eventType}|${e.ledgerSequence}`));
-
-          if (toInsert.length > 0) {
-            await tx.marketplaceEvent.createMany({
-              data: toInsert.map((ev) => ({
-                listingId: ev.listingId,
-                eventType: ev.eventType,
-                actor: ev.actor,
-                data: ev.data,
-                ledgerSequence: ev.ledgerSequence,
-              })),
-              skipDuplicates: true,
-            });
-
-            // Apply state updates for newly-inserted events inside the same transaction
-            for (const ev of toInsert) {
-              await processEvent(ev, tx, true);
-            }
-          }
-
+          const toInsert = await applyDecodedEvents(decodedEvents, tx);
           const updated = await tx.syncState.update({
             where: { id: 1 },
-            data: {
-              lastLedger: maxLedger,
-              lastLedgerHash: latestHash,
-            },
+            data: buildSyncStateLedgerData(maxLedger, latestHash),
           });
 
           return { updatedState: updated, newEvents: toInsert };
         });
 
-        latestLedgerProcessedGauge.set(updatedState.lastLedger);
-        networkLatestLedgerGauge.set(networkLatestLedger);
-        syncLatencyGauge.set(Math.max(0, networkLatestLedger - updatedState.lastLedger));
+        updateSyncMetrics(updatedState.lastLedger, networkLatestLedger);
 
-        // Emit SSEs for events that were actually newly applied
         for (const ev of newEvents) emitSSEEvent(ev);
-      } else if (response.latestLedger && response.latestLedger > syncState.lastLedger) {
-        // If there are no events but the network has advanced, we can catch up the syncState
-        // so we don't scan empty ranges repeatedly. Fetch the hash for the latest ledger.
-        let newHash: string | null = null;
+      } else if (effectiveLatestLedger > syncState.lastLedger) {
         try {
           const ledgersRes = await server.getLedgers({
-            startLedger: response.latestLedger,
-            pagination: { limit: 1 }
+            startLedger: effectiveLatestLedger,
+            pagination: { limit: 1 },
           });
           if (ledgersRes.ledgers && ledgersRes.ledgers.length > 0) {
-            newHash = ledgersRes.ledgers[0].hash;
+            latestHash = ledgersRes.ledgers[0].hash;
           }
         } catch (err) {
-          console.error(`Failed to fetch hash for latest network ledger ${response.latestLedger}:`, err);
+          console.error(`Failed to fetch hash for latest network ledger ${effectiveLatestLedger}:`, err);
         }
 
         const updatedState = await prisma.syncState.update({
           where: { id: 1 },
-          data: {
-            lastLedger: response.latestLedger,
-            lastLedgerHash: newHash,
-          },
+          data: buildSyncStateLedgerData(effectiveLatestLedger, latestHash),
         });
 
-        latestLedgerProcessedGauge.set(updatedState.lastLedger);
-        networkLatestLedgerGauge.set(networkLatestLedger);
-        syncLatencyGauge.set(Math.max(0, networkLatestLedger - updatedState.lastLedger));
+        updateSyncMetrics(updatedState.lastLedger, networkLatestLedger);
+      } else {
+        updateSyncMetrics(syncState.lastLedger, networkLatestLedger);
       }
 
       consecutiveErrors = 0;
     } catch (error) {
+      // RPC out-of-bounds (-32600): the requested ledger is outside the node's
+      // available window.  This is transient load-balancer lag — skip the poll
+      // cycle without touching the database.
+      if (isRpcOutOfBoundsError(error)) {
+        console.warn({
+          msg: 'RPC out-of-bounds error (-32600) — skipping poll cycle, no DB rollback',
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+        continue;
+      }
+
       consecutiveErrors += 1;
       const backoff = Math.min(
         BASE_BACKOFF_MS * Math.pow(2, consecutiveErrors - 1),
@@ -298,6 +334,11 @@ export async function startPolling() {
     consecutiveErrors = 0;
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
   }
+
+    // If the loop exited due to shutdown signal, ensure resources are cleaned
+    if (shuttingDown) {
+      await gracefulShutdown();
+    }
 }
 
 async function fetchListingFromChain(_listingId: bigint): Promise<any | null> {
@@ -306,6 +347,75 @@ async function fetchListingFromChain(_listingId: bigint): Promise<any | null> {
 
 async function fetchAuctionFromChain(_auctionId: bigint): Promise<any | null> {
   return null;
+}
+
+async function fetchTokenUri(collectionId: string, tokenId: bigint): Promise<string | null> {
+  try {
+    const rpcServer = new rpc.Server(RPC_URL, { allowHttp: false });
+    const contract = new Contract(collectionId);
+    const dummy = Keypair.random();
+    const account = await rpcServer.getAccount(dummy.publicKey()).catch(() => new Account(dummy.publicKey(), "0"));
+    const tx = new TransactionBuilder(account, {
+      fee: "10000",
+      networkPassphrase: process.env.STELLAR_NETWORK_PASSPHRASE || "Test SDF Network ; September 2015",
+    })
+      .addOperation(contract.call("token_uri", nativeToScVal(Number(tokenId), { type: "u64" })))
+      .setTimeout(30)
+      .build();
+
+    const simResult = await rpcServer.simulateTransaction(tx);
+    if (rpc.Api.isSimulationSuccess(simResult)) {
+      const retVal = simResult.result?.retval;
+      if (retVal) {
+        return scValToNative(retVal)?.toString() || null;
+      }
+    }
+  } catch (err) {
+    console.error(`Failed to fetch token URI for collection ${collectionId} token ${tokenId}:`, err);
+  }
+  return null;
+}
+
+export async function applyDecodedEvents(decodedEvents: any[], tx: any) {
+  const conditions = decodedEvents.map((event) => ({
+    listingId: event.listingId ?? null,
+    eventType: event.eventType,
+    ledgerSequence: event.ledgerSequence,
+  }));
+
+  const existing = conditions.length
+    ? await tx.marketplaceEvent.findMany({
+        where: { OR: conditions },
+        select: { listingId: true, eventType: true, ledgerSequence: true },
+      })
+    : [];
+
+  const existingSet = new Set(
+    existing.map((event: any) => `${event.listingId ?? 'null'}|${event.eventType}|${event.ledgerSequence}`)
+  );
+
+  const toInsert = decodedEvents.filter(
+    (event: any) => !existingSet.has(`${event.listingId ?? 'null'}|${event.eventType}|${event.ledgerSequence}`)
+  );
+
+  if (toInsert.length > 0) {
+    await tx.marketplaceEvent.createMany({
+      data: toInsert.map((event) => ({
+        listingId: event.listingId,
+        eventType: event.eventType,
+        actor: event.actor,
+        data: event.data,
+        ledgerSequence: event.ledgerSequence,
+      })),
+      skipDuplicates: true,
+    });
+
+    for (const event of toInsert) {
+      await processEvent(event, tx, true);
+    }
+  }
+
+  return toInsert;
 }
 
 export async function processEvent(event: any, tx?: any, skipInsert = false) {
@@ -325,7 +435,7 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
     });
   }
 
-  // 2. Handle deploy events (no listingId — collection deployments)
+  // Handle deploy events (no listingId — collection deployments)
   if (eventType === 'DEPLOY_NORMAL_721' || eventType === 'DEPLOY_NORMAL_1155' ||
       eventType === 'DEPLOY_LAZY_721' || eventType === 'DEPLOY_LAZY_1155') {
     const kindMap: Record<string, string> = {
@@ -355,7 +465,7 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
     return;
   }
 
-  // 3. Update Listing state based on event type
+  // Update Listing state based on event type
   if (!listingId) return;
 
   switch (eventType) {
@@ -368,14 +478,9 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
       const artist = chainListing ? chainListing.artist.toString() : data.artist;
       const price = chainListing ? chainListing.price.toString() : data.price;
       const currency = chainListing ? chainListing.currency.toString() : data.currency;
-      const metadataCid = chainListing 
-        ? (chainListing.metadata_cid instanceof Uint8Array 
-            ? new TextDecoder().decode(chainListing.metadata_cid) 
-            : chainListing.metadata_cid.toString())
-        : data.metadata_cid;
+      const collection = chainListing ? chainListing.collection.toString() : data.collection;
+      const nftTokenId = chainListing ? BigInt(chainListing.token_id) : BigInt(data.token_id);
       const token = chainListing ? chainListing.token.toString() : (data.token || '');
-      const royaltyBps = chainListing ? Number(chainListing.royalty_bps) : (data.royalty_bps || 0);
-      const originalCreator = chainListing ? chainListing.original_creator.toString() : artist;
       
       const recipients = chainListing 
         ? chainListing.recipients.map((r: any) => ({
@@ -383,6 +488,8 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
             percentage: Number(r.percentage)
           }))
         : [];
+
+      const metadataCid = await fetchTokenUri(collection, nftTokenId);
 
       await db.listing.upsert({
         where: { listingId },
@@ -392,11 +499,11 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
           owner: null,
           price,
           currency,
-          metadataCid,
+          collection,
+          nftTokenId,
           token,
+          metadataCid,
           status: 'Active',
-          royaltyBps,
-          originalCreator,
           recipients,
           createdAtLedger: ledgerSequence,
           updatedAtLedger: ledgerSequence,
@@ -404,9 +511,10 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
         update: {
           artist,
           price,
+          collection,
+          nftTokenId,
           metadataCid,
           status: 'Active',
-          originalCreator,
           recipients,
           updatedAtLedger: ledgerSequence,
         }
@@ -414,19 +522,22 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
       break;
     }
 
-    case 'LISTING_UPDATED':
-      await db.listing.update({
+    case 'LISTING_UPDATED': {
+      const { count } = await db.listing.updateMany({
         where: { listingId },
         data: {
           price: data.new_price,
-          metadataCid: data.metadata_cid,
+          collection: data.collection,
+          nftTokenId: BigInt(data.token_id || 0),
           updatedAtLedger: ledgerSequence,
         },
       });
+      if (count === 0) console.warn(`LISTING_UPDATED: listing ${listingId} not found at ledger ${ledgerSequence}`);
       break;
+    }
 
-    case 'ARTWORK_SOLD':
-      await db.listing.update({
+    case 'ARTWORK_SOLD': {
+      const { count } = await db.listing.updateMany({
         where: { listingId },
         data: {
           status: 'Sold',
@@ -434,17 +545,21 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
           updatedAtLedger: ledgerSequence,
         },
       });
+      if (count === 0) console.error(`ARTWORK_SOLD: listing ${listingId} not found — sale not recorded at ledger ${ledgerSequence}`);
       break;
+    }
 
-    case 'LISTING_CANCELLED':
-      await db.listing.update({
+    case 'LISTING_CANCELLED': {
+      const { count } = await db.listing.updateMany({
         where: { listingId },
         data: {
           status: 'Cancelled',
           updatedAtLedger: ledgerSequence,
         },
       });
+      if (count === 0) console.warn(`LISTING_CANCELLED: listing ${listingId} not found at ledger ${ledgerSequence}`);
       break;
+    }
     
     case 'AUCTION_CREATED': {
       let chainAuction = await fetchAuctionFromChain(listingId);
@@ -456,13 +571,8 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
       const reservePrice = chainAuction ? chainAuction.reserve_price.toString() : (data.reserve_price || '0');
       const token = chainAuction ? chainAuction.token.toString() : (data.token || '');
       const endTime = chainAuction ? BigInt(chainAuction.end_time) : BigInt(data.end_time || 0);
-      const royaltyBps = chainAuction ? Number(chainAuction.royalty_bps) : Number(data.royalty_bps || 0);
-      const originalCreator = chainAuction ? chainAuction.original_creator.toString() : creator;
-      const metadataCid = chainAuction 
-        ? (chainAuction.metadata_cid instanceof Uint8Array 
-            ? new TextDecoder().decode(chainAuction.metadata_cid) 
-            : chainAuction.metadata_cid.toString())
-        : (data.metadata_cid || '');
+      const collection = chainAuction ? chainAuction.collection.toString() : data.collection;
+      const nftTokenId = chainAuction ? BigInt(chainAuction.token_id) : BigInt(data.token_id || 0);
       const recipients = chainAuction 
         ? chainAuction.recipients.map((r: any) => ({
             address: r.address.toString(),
@@ -470,34 +580,36 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
           }))
         : [];
 
+      const metadataCid = await fetchTokenUri(collection, nftTokenId);
+
       await db.auction.upsert({
         where: { auctionId: listingId },
         create: {
           auctionId: listingId,
           creator,
-          metadataCid,
+          collection,
+          nftTokenId,
           token,
+          metadataCid,
           reservePrice,
           highestBid: '0',
           highestBidder: null,
           endTime,
           status: 'Active',
           recipients,
-          royaltyBps,
-          originalCreator,
           createdAtLedger: ledgerSequence,
           updatedAtLedger: ledgerSequence,
         },
         update: {
           creator,
-          metadataCid,
+          collection,
+          nftTokenId,
           token,
+          metadataCid,
           reservePrice,
           endTime,
           status: 'Active',
           recipients,
-          royaltyBps,
-          originalCreator,
           updatedAtLedger: ledgerSequence,
         }
       });
@@ -505,7 +617,7 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
     }
 
     case 'BID_PLACED': {
-      await db.auction.update({
+      const { count } = await db.auction.updateMany({
         where: { auctionId: listingId },
         data: {
           highestBid: data.bid_amount,
@@ -513,11 +625,12 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
           updatedAtLedger: ledgerSequence,
         }
       });
+      if (count === 0) console.warn(`BID_PLACED: auction ${listingId} not found at ledger ${ledgerSequence}`);
       break;
     }
 
     case 'AUCTION_RESOLVED': {
-      await db.auction.update({
+      const { count } = await db.auction.updateMany({
         where: { auctionId: listingId },
         data: {
           status: 'Finalized',
@@ -526,6 +639,19 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
           updatedAtLedger: ledgerSequence,
         }
       });
+      if (count === 0) console.error(`AUCTION_RESOLVED: auction ${listingId} not found — resolution not recorded at ledger ${ledgerSequence}`);
+      break;
+    }
+
+    case 'AUCTION_CANCELLED': {
+      const { count } = await db.auction.updateMany({
+        where: { auctionId: listingId },
+        data: {
+          status: 'Cancelled',
+          updatedAtLedger: ledgerSequence,
+        },
+      });
+      if (count === 0) console.warn(`AUCTION_CANCELLED: auction ${listingId} not found at ledger ${ledgerSequence}`);
       break;
     }
 
@@ -562,14 +688,15 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
           updatedAtLedger: ledgerSequence,
         }
       });
-      await db.listing.update({
+      const { count: listingCount } = await db.listing.updateMany({
         where: { listingId: BigInt(data.listing_id) },
         data: {
           status: 'Sold',
           owner: data.offerer,
           updatedAtLedger: ledgerSequence,
         }
-      }).catch(() => {});
+      });
+      if (listingCount === 0) console.error(`OFFER_ACCEPTED: listing ${data.listing_id} not found — offer ${data.offer_id} accepted but listing not updated at ledger ${ledgerSequence}`);
       break;
     }
 
@@ -595,6 +722,68 @@ export async function processEvent(event: any, tx?: any, skipInsert = false) {
       break;
     }
 
+    case 'NFT_STAKED': {
+      const tokenAddress = data.token_address?.toString() || data.token_address || '';
+      const tokenId = BigInt(data.token_id ?? 0);
+      const collection = data.collection?.toString() || '';
+      const stakedAt = data.timestamp ? new Date(Number(data.timestamp) * 1000) : new Date();
+
+      await db.stakedNFT.upsert({
+        where: {
+          owner_tokenAddress_tokenId: {
+            owner: actor,
+            tokenAddress,
+            tokenId,
+          },
+        },
+        create: {
+          owner: actor,
+          tokenAddress,
+          tokenId,
+          collection,
+          stakedAt,
+          status: 'Active',
+          rewardsEarned: '0',
+          createdAtLedger: ledgerSequence,
+          updatedAtLedger: ledgerSequence,
+        },
+        update: {
+          status: 'Active',
+          stakedAt,
+          updatedAtLedger: ledgerSequence,
+        }
+      });
+      break;
+    }
+
+    case 'NFT_UNSTAKED': {
+      const tokenAddr = data.token_address?.toString() || data.token_address || '';
+      const tId = BigInt(data.token_id ?? 0);
+
+      await db.stakedNFT.updateMany({
+        where: {
+          owner: actor,
+          tokenAddress: tokenAddr,
+          tokenId: tId,
+        },
+        data: {
+          status: 'Unstaked',
+          updatedAtLedger: ledgerSequence,
+        }
+      });
+      break;
+    }
+
+    case 'REWARDS_CLAIMED': {
+      await db.stakedNFT.updateMany({
+        where: { owner: actor, status: 'Active' },
+        data: {
+          rewardsEarned: { increment: data.amount?.toString() || '0' },
+          updatedAtLedger: ledgerSequence,
+        }
+      });
+      break;
+    }
   }
 
   // Broadcast to any connected SSE clients after the DB write is complete.

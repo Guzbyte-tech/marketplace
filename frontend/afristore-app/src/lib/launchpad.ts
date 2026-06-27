@@ -54,7 +54,7 @@ export async function deployNormal721(
   maxSupply: number,
   royaltyBps: number,
   royaltyReceiver: string,
-  salt: Buffer // 32 bytes
+  salt: Buffer, // 32 bytes
 ): Promise<string> {
   const args: xdr.ScVal[] = [
     toAddressScVal(creatorPublicKey),
@@ -72,7 +72,7 @@ export async function deployNormal721(
     "deploy_normal_721",
     args,
     false,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
   return (scValToNative(retVal) as Address).toString();
 }
@@ -86,7 +86,7 @@ export async function deployNormal1155(
   name: string,
   royaltyBps: number,
   royaltyReceiver: string,
-  salt: Buffer
+  salt: Buffer,
 ): Promise<string> {
   const args: xdr.ScVal[] = [
     toAddressScVal(creatorPublicKey),
@@ -102,7 +102,7 @@ export async function deployNormal1155(
     "deploy_normal_1155",
     args,
     false,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
   return (scValToNative(retVal) as Address).toString();
 }
@@ -119,7 +119,7 @@ export async function deployLazy721(
   maxSupply: number,
   royaltyBps: number,
   royaltyReceiver: string,
-  salt: Buffer
+  salt: Buffer,
 ): Promise<string> {
   const args: xdr.ScVal[] = [
     toAddressScVal(creatorPublicKey),
@@ -138,7 +138,7 @@ export async function deployLazy721(
     "deploy_lazy_721",
     args,
     false,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
   return (scValToNative(retVal) as Address).toString();
 }
@@ -153,7 +153,7 @@ export async function deployLazy1155(
   name: string,
   royaltyBps: number,
   royaltyReceiver: string,
-  salt: Buffer
+  salt: Buffer,
 ): Promise<string> {
   const args: xdr.ScVal[] = [
     toAddressScVal(creatorPublicKey),
@@ -170,7 +170,7 @@ export async function deployLazy1155(
     "deploy_lazy_1155",
     args,
     false,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
   return (scValToNative(retVal) as Address).toString();
 }
@@ -179,7 +179,7 @@ export async function deployLazy1155(
  * collections_by_creator
  */
 export async function getCollectionsByCreator(
-  creatorPublicKey: string
+  creatorPublicKey: string,
 ): Promise<CollectionRecord[]> {
   const DUMMY_KEY = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
   const args = [toAddressScVal(creatorPublicKey)];
@@ -188,33 +188,104 @@ export async function getCollectionsByCreator(
     "collections_by_creator",
     args,
     true,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
   const native = scValToNative(retVal) as any[];
   return native.map(parseCollectionRecord);
 }
 
 /**
- * all_collections
+ * get_collections — paginated
  */
-export async function getAllCollections(): Promise<CollectionRecord[]> {
+export async function getCollections(
+  startIndex: number,
+  limit: number,
+): Promise<CollectionRecord[]> {
   const DUMMY_KEY = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+  const args: xdr.ScVal[] = [
+    nativeToScVal(startIndex, { type: "u32" }),
+    nativeToScVal(limit, { type: "u32" }),
+  ];
   const retVal = await invokeContract(
     DUMMY_KEY,
-    "all_collections",
-    [],
+    "get_collections",
+    args,
     true,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
   const native = scValToNative(retVal) as any[];
   return native.map(parseCollectionRecord);
 }
 
 export async function getCollectionRecordByAddress(
-  collectionAddress: string
+  collectionAddress: string,
 ): Promise<CollectionRecord | null> {
-  const all = await getAllCollections();
-  return all.find((c) => c.address === collectionAddress) ?? null;
+  const DUMMY_KEY = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+  const args = [toAddressScVal(collectionAddress)];
+  try {
+    const retVal = await invokeContract(
+      DUMMY_KEY,
+      "get_collection_by_id",
+      args,
+      true,
+      config.launchpadContractId,
+    );
+    const native = scValToNative(retVal);
+    if (!native) return null;
+    return parseCollectionRecord(native);
+  } catch {
+    return null;
+  }
+}
+
+// ── Staking pool factory ──────────────────────────────────────
+
+/**
+ * Look up the staking pool clone for an NFT collection address.
+ */
+export async function getStakingPoolByNft(
+  nftAddress: string,
+): Promise<string | null> {
+  const DUMMY_KEY =
+    "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+  const retVal = await invokeContract(
+    DUMMY_KEY,
+    "get_staking_pool",
+    [toAddressScVal(nftAddress)],
+    true,
+    config.launchpadContractId,
+  );
+  const native = scValToNative(retVal);
+  if (!native) return null;
+  return (native as Address).toString();
+}
+
+/**
+ * Deploy a dedicated NftStaking clone for an NFT collection via the Launchpad.
+ */
+export async function deployStakingPool(
+  creatorPublicKey: string,
+  nftAddress: string,
+  rewardToken: string,
+  rewardRate: bigint,
+  salt: Buffer,
+): Promise<string> {
+  const args: xdr.ScVal[] = [
+    toAddressScVal(creatorPublicKey),
+    toAddressScVal(nftAddress),
+    toAddressScVal(rewardToken),
+    nativeToScVal(rewardRate, { type: "i128" }),
+    nativeToScVal(Uint8Array.from(salt), { type: "bytes" }),
+  ];
+
+  const retVal = await invokeContract(
+    creatorPublicKey,
+    "deploy_staking_pool",
+    args,
+    false,
+    config.launchpadContractId,
+  );
+  return (scValToNative(retVal) as Address).toString();
 }
 
 /**
@@ -227,7 +298,7 @@ export async function getCollectionCount(): Promise<number> {
     "collection_count",
     [],
     true,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
   return Number(scValToNative(retVal));
 }
@@ -242,7 +313,7 @@ export async function getPlatformFee(): Promise<PlatformFee> {
     "platform_fee",
     [],
     true,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
   const native = scValToNative(retVal) as [Address, number];
   return {
@@ -261,7 +332,7 @@ export async function getLaunchpadAdmin(): Promise<string> {
     "admin",
     [],
     true,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
   return (scValToNative(retVal) as Address).toString();
 }
@@ -271,7 +342,7 @@ export async function getLaunchpadAdmin(): Promise<string> {
  */
 export async function transferLaunchpadAdmin(
   adminPublicKey: string,
-  newAdminAddress: string
+  newAdminAddress: string,
 ): Promise<void> {
   const args = [toAddressScVal(newAdminAddress)];
   await invokeContract(
@@ -279,7 +350,7 @@ export async function transferLaunchpadAdmin(
     "transfer_admin",
     args,
     false,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
 }
 
@@ -289,7 +360,7 @@ export async function transferLaunchpadAdmin(
 export async function updatePlatformFee(
   adminPublicKey: string,
   receiverAddress: string,
-  feeBps: number
+  feeBps: number,
 ): Promise<void> {
   const args = [
     toAddressScVal(receiverAddress),
@@ -300,7 +371,7 @@ export async function updatePlatformFee(
     "update_platform_fee",
     args,
     false,
-    config.launchpadContractId
+    config.launchpadContractId,
   );
 }
 
@@ -320,7 +391,7 @@ export interface CollectionMetadata {
  * Fetch metadata for any deployed collection (721 or 1155).
  */
 export async function getCollectionMetadata(
-  collectionAddress: string
+  collectionAddress: string,
 ): Promise<CollectionMetadata> {
   const DUMMY_KEY = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
@@ -328,7 +399,7 @@ export async function getCollectionMetadata(
     await Promise.all([
       invokeContract(DUMMY_KEY, "name", [], true, collectionAddress),
       invokeContract(DUMMY_KEY, "symbol", [], true, collectionAddress).catch(
-        () => nativeToScVal("", { type: "string" })
+        () => nativeToScVal("", { type: "string" }),
       ), // 1155 might not have symbol
       invokeContract(DUMMY_KEY, "creator", [], true, collectionAddress),
       invokeContract(DUMMY_KEY, "total_supply", [], true, collectionAddress),
@@ -356,7 +427,7 @@ export async function mint721(
   creatorPublicKey: string,
   collectionAddress: string,
   recipient: string,
-  metadataCid: string
+  metadataCid: string,
 ): Promise<number> {
   const args: xdr.ScVal[] = [
     toAddressScVal(recipient),
@@ -368,7 +439,7 @@ export async function mint721(
     "mint",
     args,
     false,
-    collectionAddress
+    collectionAddress,
   );
   return Number(scValToNative(retVal));
 }
@@ -389,7 +460,7 @@ export async function mint1155New(
   collectionAddress: string,
   recipient: string,
   amount: bigint,
-  metadataCid: string
+  metadataCid: string,
 ): Promise<number> {
   const args: xdr.ScVal[] = [
     toAddressScVal(recipient),
@@ -402,7 +473,7 @@ export async function mint1155New(
     "mint_new",
     args,
     false,
-    collectionAddress
+    collectionAddress,
   );
   return Number(scValToNative(retVal));
 }
@@ -439,7 +510,9 @@ function parseHex32(label: string, hex: string): Buffer {
 function parseHexSignature(label: string, hex: string): Buffer {
   const t = hex.trim();
   if (!/^[0-9a-fA-F]{128}$/.test(t)) {
-    throw new Error(`${label} must be exactly 128 hex characters (ed25519 signature)`);
+    throw new Error(
+      `${label} must be exactly 128 hex characters (ed25519 signature)`,
+    );
   }
   return Buffer.from(t, "hex");
 }
@@ -451,7 +524,9 @@ function mintVoucher721ToScVal(v: Lazy721VoucherInput): xdr.ScVal {
   const hashBuf = parseHex32("uri_hash", v.uri_hash);
   if (v.uri.length === 0) throw new Error("uri is required");
   if (!v.currency || !v.currency.startsWith("C")) {
-    throw new Error("currency must be a Stellar contract address (SAC), e.g. the XLM SAC");
+    throw new Error(
+      "currency must be a Stellar contract address (SAC), e.g. the XLM SAC",
+    );
   }
   return xdr.ScVal.scvMap([
     mapKeySymbol("token_id", nativeToScVal(tokenId, { type: "u64" })),
@@ -460,7 +535,7 @@ function mintVoucher721ToScVal(v: Lazy721VoucherInput): xdr.ScVal {
     mapKeySymbol("uri", nativeToScVal(v.uri, { type: "string" })),
     mapKeySymbol(
       "uri_hash",
-      nativeToScVal(Uint8Array.from(hashBuf), { type: "bytes" })
+      nativeToScVal(Uint8Array.from(hashBuf), { type: "bytes" }),
     ),
     mapKeySymbol("valid_until", nativeToScVal(validUntil, { type: "u64" })),
   ]);
@@ -484,7 +559,7 @@ function mintVoucher1155ToScVal(v: Lazy1155VoucherInput): xdr.ScVal {
     mapKeySymbol("uri", nativeToScVal(v.uri, { type: "string" })),
     mapKeySymbol(
       "uri_hash",
-      nativeToScVal(Uint8Array.from(hashBuf), { type: "bytes" })
+      nativeToScVal(Uint8Array.from(hashBuf), { type: "bytes" }),
     ),
     mapKeySymbol("valid_until", nativeToScVal(validUntil, { type: "u64" })),
   ]);
@@ -497,7 +572,7 @@ export async function redeemLazy721(
   buyerPublicKey: string,
   collectionAddress: string,
   voucher: Lazy721VoucherInput,
-  signatureHex: string
+  signatureHex: string,
 ): Promise<number> {
   const vsc = mintVoucher721ToScVal(voucher);
   const sig = parseHexSignature("signature", signatureHex);
@@ -511,7 +586,7 @@ export async function redeemLazy721(
     "redeem",
     args,
     false,
-    collectionAddress
+    collectionAddress,
   );
   return Number(scValToNative(retVal));
 }
@@ -524,7 +599,7 @@ export async function redeemLazy1155(
   collectionAddress: string,
   voucher: Lazy1155VoucherInput,
   amount: bigint,
-  signatureHex: string
+  signatureHex: string,
 ): Promise<void> {
   const vsc = mintVoucher1155ToScVal(voucher);
   const sig = parseHexSignature("signature", signatureHex);
@@ -534,7 +609,13 @@ export async function redeemLazy1155(
     nativeToScVal(amount, { type: "u128" }),
     nativeToScVal(Uint8Array.from(sig), { type: "bytes" }),
   ];
-  await invokeContract(buyerPublicKey, "redeem", args, false, collectionAddress);
+  await invokeContract(
+    buyerPublicKey,
+    "redeem",
+    args,
+    false,
+    collectionAddress,
+  );
 }
 
 function readJsonObject(json: string, label: string): Record<string, unknown> {
@@ -550,7 +631,11 @@ function readJsonObject(json: string, label: string): Record<string, unknown> {
   return raw as Record<string, unknown>;
 }
 
-function fieldString(o: Record<string, unknown>, key: string, label: string): string {
+function fieldString(
+  o: Record<string, unknown>,
+  key: string,
+  label: string,
+): string {
   const v = o[key];
   if (v === undefined || v === null) {
     throw new Error(`${label}: missing "${key}"`);

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import {
-  getAllCollections,
+  getCollections,
   getCollectionsByCreator,
   getCollectionMetadata,
   deployNormal721,
@@ -15,10 +15,14 @@ import {
 } from "@/lib/launchpad";
 import { assertSupportedTokenAddress } from "@/lib/token-support";
 
+const COLLECTIONS_PAGE_SIZE = 50;
+
 // ── useLaunchpadCollections ───────────────────────────────────
 
 export function useLaunchpadCollections() {
   const [collections, setCollections] = useState<CollectionRecord[]>([]);
+  const [startIndex, setStartIndex] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,20 +30,41 @@ export function useLaunchpadCollections() {
     setIsLoading(true);
     setError(null);
     try {
-      const all = await getAllCollections();
-      setCollections(all);
+      const page = await getCollections(0, COLLECTIONS_PAGE_SIZE);
+      setCollections(page);
+      setStartIndex(COLLECTIONS_PAGE_SIZE);
+      setHasMore(page.length >= COLLECTIONS_PAGE_SIZE);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load collections");
+      setError(
+        err instanceof Error ? err.message : "Failed to load collections",
+      );
     } finally {
       setIsLoading(false);
     }
   }, []);
 
+  const loadMore = useCallback(async () => {
+    if (!hasMore || isLoading) return;
+    setIsLoading(true);
+    try {
+      const page = await getCollections(startIndex, COLLECTIONS_PAGE_SIZE);
+      setCollections((prev) => [...prev, ...page]);
+      setStartIndex((prev) => prev + COLLECTIONS_PAGE_SIZE);
+      setHasMore(page.length >= COLLECTIONS_PAGE_SIZE);
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error ? err.message : "Failed to load more collections",
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }, [startIndex, hasMore, isLoading]);
+
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  return { collections, isLoading, error, refresh };
+  return { collections, isLoading, error, refresh, loadMore, hasMore };
 }
 
 // ── useCreatorCollections ─────────────────────────────────────
@@ -57,7 +82,11 @@ export function useCreatorCollections(creatorPublicKey: string | null) {
       const results = await getCollectionsByCreator(creatorPublicKey);
       setCollections(results);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load creator collections");
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to load creator collections",
+      );
     } finally {
       setIsLoading(false);
     }
@@ -85,7 +114,11 @@ export function useCollectionDetail(address: string | null) {
       const data = await getCollectionMetadata(address);
       setMetadata(data);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load collection metadata");
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to load collection metadata",
+      );
     } finally {
       setIsLoading(false);
     }
@@ -126,7 +159,10 @@ export function useDeployCollection(creatorPublicKey: string | null) {
       setError(null);
 
       try {
-        const token = await assertSupportedTokenAddress(input.currencyAddress, "collection");
+        const token = await assertSupportedTokenAddress(
+          input.currencyAddress,
+          "collection",
+        );
         const salt = Buffer.alloc(32); // Simple salt for now, can be randomized
         window.crypto.getRandomValues(salt);
 
@@ -142,7 +178,7 @@ export function useDeployCollection(creatorPublicKey: string | null) {
               input.maxSupply || 0,
               input.royaltyBps,
               input.royaltyReceiver,
-              salt
+              salt,
             );
             break;
           case "Normal1155":
@@ -152,11 +188,12 @@ export function useDeployCollection(creatorPublicKey: string | null) {
               input.name,
               input.royaltyBps,
               input.royaltyReceiver,
-              salt
+              salt,
             );
             break;
           case "LazyMint721":
-            if (!input.creatorPubkeyBytes) throw new Error("Missing creator pubkey bytes");
+            if (!input.creatorPubkeyBytes)
+              throw new Error("Missing creator pubkey bytes");
             address = await deployLazy721(
               creatorPublicKey,
               token.address,
@@ -166,11 +203,12 @@ export function useDeployCollection(creatorPublicKey: string | null) {
               input.maxSupply || 0,
               input.royaltyBps,
               input.royaltyReceiver,
-              salt
+              salt,
             );
             break;
           case "LazyMint1155":
-            if (!input.creatorPubkeyBytes) throw new Error("Missing creator pubkey bytes");
+            if (!input.creatorPubkeyBytes)
+              throw new Error("Missing creator pubkey bytes");
             address = await deployLazy1155(
               creatorPublicKey,
               token.address,
@@ -178,7 +216,7 @@ export function useDeployCollection(creatorPublicKey: string | null) {
               input.name,
               input.royaltyBps,
               input.royaltyReceiver,
-              salt
+              salt,
             );
             break;
         }
@@ -191,7 +229,7 @@ export function useDeployCollection(creatorPublicKey: string | null) {
         setIsDeploying(false);
       }
     },
-    [creatorPublicKey]
+    [creatorPublicKey],
   );
 
   return { deploy, isDeploying, error };

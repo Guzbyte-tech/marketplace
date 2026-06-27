@@ -93,11 +93,18 @@ export async function generateMetadata({
     } catch (_e) {
       // may be a listing
     }
+  };
 
-    const cid = listing?.metadata_cid || auction?.metadata_cid;
-    if (cid) {
-      metadata = await fetchMetadata(cid);
+  const [bidAmount, setBidAmount] = useState("");
+  const handleBid = async () => {
+    if (!auction || !bidAmount) return;
+    const success = await bid(auction.auction_id, Number(bidAmount));
+    if (success) {
+      const updated = await getAuction(auction.auction_id);
+      setAuction(updated);
+      setBidAmount("");
     }
+  };
 
     // Fallback for mock IDs 1–6
     if (!metadata && Number(id) >= 1 && Number(id) <= 6) {
@@ -117,14 +124,22 @@ export async function generateMetadata({
         artist: m.artist,
       } as typeof listing;
     }
+  };
 
-    if (!metadata) {
-      return {
-        title: "Artwork Not Found - Afristore",
-        description:
-          "This artwork could not be found on Afristore marketplace.",
-      };
+  const handleShare = async () => {
+    const url = typeof window !== "undefined" ? window.location.href : "";
+    try {
+      await navigator.clipboard.writeText(url);
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 2000);
+    } catch {
+      if (typeof navigator.share === "function") {
+        navigator
+          .share({ title: metadata?.title ?? `Listing #${id}`, url })
+          .catch(() => {});
+      }
     }
+  };
 
     const title = metadata.title || `Artwork #${id}`;
     const description =
@@ -166,7 +181,6 @@ export async function generateMetadata({
       description: "Discover unique African art on the Stellar blockchain",
     };
   }
-}
 
 // ── Server Component page ────────────────────────────────────
 

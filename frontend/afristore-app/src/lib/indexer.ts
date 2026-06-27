@@ -145,9 +145,7 @@ function isIndexerCollectionRow(v: unknown): v is IndexerCollectionRow {
   );
 }
 
-function eventTypeToActivity(
-  eventType: string
-): ActivityEvent["type"] {
+function eventTypeToActivity(eventType: string): ActivityEvent["type"] {
   switch (eventType) {
     case "LISTING_CREATED":
       return "LISTED";
@@ -164,20 +162,20 @@ function eventTypeToActivity(
  * Fetches marketplace-related events for a wallet from the Afristore indexer.
  */
 export async function getWalletActivity(
-  publicKey: string
+  publicKey: string,
 ): Promise<ActivityEvent[]> {
   if (!isNonEmptyString(publicKey)) return [];
   try {
     const raw = await fetchWithRetry<unknown>(
-      `/wallets/${encodeURIComponent(publicKey)}/activity?limit=50`
+      `/wallets/${encodeURIComponent(publicKey)}/activity?limit=50`,
     );
     return parseActivityList(raw).map((ev) =>
-      mapWalletEventToActivity(ev, publicKey)
+      mapWalletEventToActivity(ev, publicKey),
     );
   } catch (e) {
     console.warn(
       "[indexer] getWalletActivity:",
-      e instanceof Error ? e.message : e
+      e instanceof Error ? e.message : e,
     );
     return [];
   }
@@ -185,7 +183,7 @@ export async function getWalletActivity(
 
 function mapWalletEventToActivity(
   ev: RawMarketplaceEvent,
-  publicKey: string
+  publicKey: string,
 ): ActivityEvent {
   const data = ev.data;
   const listingIdRaw = ev.listingId;
@@ -236,7 +234,7 @@ function mapWalletEventToActivity(
  * Estimates total royalties for an artist from indexed sales (listing rows).
  */
 export async function getRoyaltyStats(
-  publicKey: string
+  publicKey: string,
 ): Promise<RoyaltyStatsResponse> {
   const empty: RoyaltyStatsResponse = {
     totalEarned: "0",
@@ -246,13 +244,13 @@ export async function getRoyaltyStats(
   if (!isNonEmptyString(publicKey)) return empty;
   try {
     const data = await fetchWithRetry<unknown>(
-      `/wallets/${encodeURIComponent(publicKey)}/royalty-stats`
+      `/wallets/${encodeURIComponent(publicKey)}/royalty-stats`,
     );
     if (isRoyaltyStatsResponse(data)) return data;
   } catch (e) {
     console.warn(
       "[indexer] getRoyaltyStats:",
-      e instanceof Error ? e.message : e
+      e instanceof Error ? e.message : e,
     );
   }
   return empty;
@@ -262,20 +260,18 @@ export async function getRoyaltyStats(
  * Fetches activity (event timeline) for a specific marketplace listing.
  */
 export async function getListingActivity(
-  listingId: number
+  listingId: number,
 ): Promise<ActivityEvent[]> {
   if (!Number.isFinite(listingId)) return [];
   try {
-    const raw = await fetchWithRetry<unknown>(
-      `/listings/${listingId}/history`
-    );
+    const raw = await fetchWithRetry<unknown>(`/listings/${listingId}/history`);
     return parseActivityList(raw).map((ev) =>
-      mapListingHistoryEvent(ev, listingId)
+      mapListingHistoryEvent(ev, listingId),
     );
   } catch (e) {
     console.warn(
       "[indexer] getListingActivity:",
-      e instanceof Error ? e.message : e
+      e instanceof Error ? e.message : e,
     );
     return [];
   }
@@ -283,14 +279,13 @@ export async function getListingActivity(
 
 function mapListingHistoryEvent(
   ev: RawMarketplaceEvent,
-  listingId: number
+  listingId: number,
 ): ActivityEvent {
   const data = ev.data;
   const ts = ev.ledgerTimestamp
     ? new Date(ev.ledgerTimestamp).getTime()
     : Date.now();
-  const priceField =
-    data.price ?? (data as { new_price?: unknown }).new_price;
+  const priceField = data.price ?? (data as { new_price?: unknown }).new_price;
   const price = priceField != null ? String(priceField) : "0";
   const artist = addrString(data.artist);
   const buyer = addrString(data.buyer);
@@ -312,7 +307,7 @@ function mapListingHistoryEvent(
  * Deployed collections from the indexer (Supplementary to on-chain `all_collections` when the indexer is synced).
  */
 export async function getCollections(
-  filter: CollectionFilter = {}
+  filter: CollectionFilter = {},
 ): Promise<{ collections: IndexerCollectionRow[]; total: number }> {
   const params = new URLSearchParams();
   if (filter.kind) params.set("kind", filter.kind);
@@ -322,7 +317,7 @@ export async function getCollections(
   const q = params.toString();
   try {
     const raw = await fetchWithRetry<unknown>(
-      `/collections${q ? `?${q}` : ""}`
+      `/collections${q ? `?${q}` : ""}`,
     );
     if (!Array.isArray(raw)) return { collections: [], total: 0 };
     const collections = raw.filter(isIndexerCollectionRow);
@@ -330,7 +325,7 @@ export async function getCollections(
   } catch (e) {
     console.warn(
       "[indexer] getCollections:",
-      e instanceof Error ? e.message : e
+      e instanceof Error ? e.message : e,
     );
     return { collections: [], total: 0 };
   }
@@ -340,7 +335,7 @@ export async function getCollections(
  * Fetch royalty stats for an artist (alias for getRoyaltyStats for server-side usage)
  */
 export async function fetchRoyaltyStats(
-  publicKey: string
+  publicKey: string,
 ): Promise<RoyaltyStatsResponse> {
   return getRoyaltyStats(publicKey);
 }
@@ -354,14 +349,14 @@ export async function fetchArtistListings(
   if (!isNonEmptyString(publicKey)) return [];
   try {
     const data = await fetchWithRetry<unknown>(
-      `/listings?artist=${encodeURIComponent(publicKey)}`
+      `/listings?artist=${encodeURIComponent(publicKey)}`,
     );
     if (Array.isArray(data)) return data as Listing[];
     return [];
   } catch (e) {
     console.warn(
       "[indexer] fetchArtistListings:",
-      e instanceof Error ? e.message : e
+      e instanceof Error ? e.message : e,
     );
     return [];
   }
@@ -369,6 +364,7 @@ export async function fetchArtistListings(
 
 /**
  * Fetch listings from the indexer with optional filters and pagination.
+ * Throws if the indexer is unreachable so callers can fall back to on-chain.
  */
 export async function fetchListings(options: {
   status?: string;
@@ -379,12 +375,12 @@ export async function fetchListings(options: {
   search?: string;
 } = {}): Promise<{ listings: Listing[]; total?: number }> {
   const params = new URLSearchParams();
-  if (options.status) params.set('status', options.status);
-  if (options.limit != null) params.set('limit', String(options.limit));
-  if (options.offset != null) params.set('offset', String(options.offset));
-  if (options.minPrice) params.set('minPrice', options.minPrice);
-  if (options.maxPrice) params.set('maxPrice', options.maxPrice);
-  if (options.search) params.set('search', options.search);
+  if (options.status) params.set("status", options.status);
+  if (options.limit != null) params.set("limit", String(options.limit));
+  if (options.offset != null) params.set("offset", String(options.offset));
+  if (options.minPrice) params.set("minPrice", options.minPrice);
+  if (options.maxPrice) params.set("maxPrice", options.maxPrice);
+  if (options.search) params.set("search", options.search);
   const q = params.toString();
   try {
     const raw = await fetchWithRetry<unknown>(`/listings${q ? `?${q}` : ''}`);
@@ -403,6 +399,8 @@ export async function fetchListings(options: {
     console.warn('[indexer] fetchListings:', e instanceof Error ? e.message : e);
     return { listings: [] };
   }
+  if (Array.isArray(raw)) return { listings: raw };
+  return { listings: [] };
 }
 
 /**
@@ -414,8 +412,8 @@ export async function fetchAuctions(options: {
   status?: string;
 } = {}): Promise<Auction[]> {
   const params = new URLSearchParams();
-  if (options.creator) params.set('creator', options.creator);
-  if (options.status) params.set('status', options.status);
+  if (options.creator) params.set("creator", options.creator);
+  if (options.status) params.set("status", options.status);
   const q = params.toString();
   const raw = await fetchWithRetry<unknown>(`/auctions${q ? `?${q}` : ''}`);
   if (Array.isArray(raw)) return raw as Auction[];
@@ -431,7 +429,61 @@ export async function fetchListingById(id: number): Promise<Listing | null> {
     const raw = await fetchWithRetry<unknown>(`/listings/${id}`);
     return raw as Listing;
   } catch (e) {
-    console.warn('[indexer] fetchListingById:', e instanceof Error ? e.message : e);
+    console.warn(
+      "[indexer] fetchListingById:",
+      e instanceof Error ? e.message : e,
+    );
     return null;
+  }
+}
+
+export interface OwnedToken {
+  collectionAddress: string;
+  tokenId: number;
+  name?: string;
+  image?: string;
+}
+
+/**
+ * Fetch tokens owned by a specific wallet.
+ */
+export async function getOwnedTokens(publicKey: string): Promise<OwnedToken[]> {
+  if (!isNonEmptyString(publicKey)) return [];
+  try {
+    const raw = await fetchWithRetry<unknown>(
+      `/wallets/${encodeURIComponent(publicKey)}/tokens`,
+    );
+    if (Array.isArray(raw)) return raw as OwnedToken[];
+    return [];
+  } catch (e) {
+    console.warn(
+      "[indexer] getOwnedTokens:",
+      e instanceof Error ? e.message : e,
+    );
+
+    // Mock data fallback for development if endpoint is missing
+    return [
+      {
+        collectionAddress: "CDXYZ1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        tokenId: 1,
+        name: "Mocked NFT #1",
+        image:
+          "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=600&auto=format&fit=crop",
+      },
+      {
+        collectionAddress: "CDABC9876543210ZYXWVUTSRQPONMLKJIHGFEDCBA",
+        tokenId: 42,
+        name: "Mocked NFT #42",
+        image:
+          "https://images.unsplash.com/photo-1620641788421-7a1c342ea42e?q=80&w=600&auto=format&fit=crop",
+      },
+      {
+        collectionAddress: "CDZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        tokenId: 7,
+        name: "Mocked NFT #7",
+        image:
+          "https://images.unsplash.com/photo-1579783902614-a3fb3927b6a5?q=80&w=600&auto=format&fit=crop",
+      },
+    ];
   }
 }

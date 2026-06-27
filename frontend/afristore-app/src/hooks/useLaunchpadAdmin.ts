@@ -10,7 +10,6 @@ import {
   transferLaunchpadAdmin,
   updatePlatformFee,
   getPlatformFee,
-  getAllCollections,
   getCollectionCount,
 } from "@/lib/launchpad";
 
@@ -66,7 +65,9 @@ export function useLaunchpadAdminStats() {
         platformFeeReceiver: platformFee.receiver,
       });
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load launchpad stats");
+      setError(
+        err instanceof Error ? err.message : "Failed to load launchpad stats",
+      );
     } finally {
       setIsLoading(false);
     }

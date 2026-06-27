@@ -7,12 +7,36 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useWalletContext } from "@/context/WalletContext";
-import { Wallet, Store, LayoutDashboard, Menu, X, AlertTriangle, LogOut, ShieldCheck, Tag, Inbox, Compass, User, Gavel, Settings, HelpCircle, Rocket } from "lucide-react";
+import {
+  AlertTriangle,
+  Compass,
+  Gavel,
+  HelpCircle,
+  Inbox,
+  LayoutDashboard,
+  Lock,
+  LogOut,
+  Menu,
+  Rocket,
+  Settings,
+  ShieldCheck,
+  Split,
+  Tag,
+  User,
+  Wallet,
+  X,
+} from "lucide-react";
 import { ConnectWalletModal } from "./ConnectWalletModal";
 
 export function Navbar() {
-  const { publicKey, isConnected, isConnecting, disconnect, isWrongNetwork, status } =
-    useWalletContext();
+  const {
+    publicKey,
+    isConnected,
+    isConnecting,
+    disconnect,
+    isWrongNetwork,
+    status,
+  } = useWalletContext();
   const [scrolled, setScrolled] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -31,17 +55,15 @@ export function Navbar() {
   return (
     <>
       <nav
-        className={`fixed top-0 left-0 right-0 z-50 transition-all duration-500 ${scrolled
-          ? "bg-midnight-900/95 backdrop-blur-xl border-b border-white/5 shadow-lg shadow-black/20"
-          : "bg-transparent"
-          }`}
+        className={`fixed top-0 left-0 right-0 z-50 transition-all duration-500 ${
+          scrolled
+            ? "bg-midnight-900/95 backdrop-blur-xl border-b border-white/5 shadow-lg shadow-black/20"
+            : "bg-transparent"
+        }`}
       >
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 sm:px-6 py-4">
           {/* Logo */}
-          <Link
-            href="/"
-            className="flex items-center gap-2.5 group"
-          >
+          <Link href="/" className="flex items-center gap-2.5 group">
             <span className="flex items-center justify-center w-10 h-10 rounded-xl bg-brand-500 text-white text-xl shadow-lg shadow-brand-500/30 group-hover:shadow-brand-500/50 transition-all duration-300 group-hover:rotate-6">
               🎨
             </span>
@@ -52,13 +74,6 @@ export function Navbar() {
 
           {/* Desktop nav links */}
           <div className="hidden md:flex items-center gap-8 text-sm font-medium">
-            <Link
-              href="/"
-              className="flex items-center gap-1.5 text-white/70 hover:text-brand-400 transition-colors duration-300"
-            >
-              <Store size={16} />
-              Marketplace
-            </Link>
             <Link
               href="/explore"
               className="flex items-center gap-1.5 text-white/70 hover:text-brand-400 transition-colors duration-300"
@@ -72,6 +87,13 @@ export function Navbar() {
             >
               <Gavel size={16} />
               Auctions
+            </Link>
+            <Link
+              href="/staking"
+              className="flex items-center gap-1.5 text-white/70 hover:text-brand-400 transition-colors duration-300"
+            >
+              <Lock size={16} />
+              Staking
             </Link>
             <Link
               href="/launchpad"
@@ -88,6 +110,13 @@ export function Navbar() {
                 >
                   <LayoutDashboard size={16} />
                   Dashboard
+                </Link>
+                <Link
+                  href="/dashboard/splitter"
+                  className="flex items-center gap-1.5 text-white/70 hover:text-brand-400 transition-colors duration-300"
+                >
+                  <Split size={16} />
+                  Splitter
                 </Link>
                 <Link
                   href="/profile"
@@ -132,7 +161,6 @@ export function Navbar() {
             </Link>
           </div>
 
-
           {/* Desktop wallet button */}
           <div className="hidden md:flex items-center gap-4">
             {isConnected ? (
@@ -154,7 +182,9 @@ export function Navbar() {
 
                 <div className="relative group">
                   <div className="flex items-center gap-2 pl-3 pr-1 py-1 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition-colors cursor-pointer">
-                    <span className="text-xs font-mono text-white/90">{shortKey}</span>
+                    <span className="text-xs font-mono text-white/90">
+                      {shortKey}
+                    </span>
                     <button
                       onClick={disconnect}
                       title="Disconnect Wallet"
@@ -188,19 +218,12 @@ export function Navbar() {
 
         {/* Mobile drawer */}
         <div
-          className={`md:hidden overflow-hidden transition-all duration-500 ${mobileOpen ? "max-h-96 opacity-100" : "max-h-0 opacity-0"
-            }`}
+          className={`md:hidden overflow-hidden transition-all duration-500 ${
+            mobileOpen ? "max-h-96 opacity-100" : "max-h-0 opacity-0"
+          }`}
         >
           <div className="bg-midnight-950/98 backdrop-blur-xl border-t border-white/5 px-4 py-8 space-y-6">
             <div className="grid grid-cols-1 gap-4">
-              <Link
-                href="/"
-                onClick={() => setMobileOpen(false)}
-                className="flex items-center gap-3 text-white/80 hover:text-brand-400 transition-colors text-lg font-display"
-              >
-                <Store size={20} className="text-brand-500" />
-                Marketplace
-              </Link>
               <Link
                 href="/explore"
                 onClick={() => setMobileOpen(false)}
@@ -216,6 +239,14 @@ export function Navbar() {
               >
                 <Gavel size={20} className="text-brand-500" />
                 Auctions
+              </Link>
+              <Link
+                href="/staking"
+                onClick={() => setMobileOpen(false)}
+                className="flex items-center gap-3 text-white/80 hover:text-brand-400 transition-colors text-lg font-display"
+              >
+                <Lock size={20} className="text-brand-500" />
+                Staking
               </Link>
               <Link
                 href="/launchpad"
@@ -234,6 +265,14 @@ export function Navbar() {
                   >
                     <LayoutDashboard size={20} className="text-brand-500" />
                     Dashboard
+                  </Link>
+                  <Link
+                    href="/dashboard/splitter"
+                    onClick={() => setMobileOpen(false)}
+                    className="flex items-center gap-3 text-white/80 hover:text-brand-400 transition-colors text-lg font-display"
+                  >
+                    <Split size={20} className="text-brand-500" />
+                    Splitter
                   </Link>
                   <Link
                     href="/profile"
@@ -287,7 +326,9 @@ export function Navbar() {
               {isConnected ? (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <p className="text-sm font-mono text-brand-300">{shortKey}</p>
+                    <p className="text-sm font-mono text-brand-300">
+                      {shortKey}
+                    </p>
                     {isWrongNetwork && (
                       <span className="flex items-center gap-1 text-[10px] font-bold text-terracotta-400 uppercase">
                         <AlertTriangle size={12} /> Network Error
@@ -323,8 +364,10 @@ export function Navbar() {
         </div>
       </nav>
 
-      <ConnectWalletModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
+      <ConnectWalletModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+      />
     </>
   );
 }
-

@@ -83,6 +83,32 @@ pub fn get_wasm_lazy_1155(env: &Env) -> Option<BytesN<32>> {
     env.storage().instance().get(&DataKey::WasmLazy1155)
 }
 
+pub fn set_staking_wasm_hash(env: &Env, hash: &BytesN<32>) {
+    env.storage().instance().set(&DataKey::WasmStaking, hash);
+}
+
+pub fn get_staking_wasm_hash(env: &Env) -> Option<BytesN<32>> {
+    env.storage().instance().get(&DataKey::WasmStaking)
+}
+
+pub fn staking_pool_by_nft(env: &Env, nft_address: &Address) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::StakingPoolByNft(nft_address.clone()))
+}
+
+pub fn record_staking_pool(env: &Env, nft_address: &Address, pool_address: &Address) {
+    env.storage().persistent().set(
+        &DataKey::StakingPoolByNft(nft_address.clone()),
+        pool_address,
+    );
+    env.storage().persistent().extend_ttl(
+        &DataKey::StakingPoolByNft(nft_address.clone()),
+        TTL_THRESHOLD,
+        TTL_BUMP,
+    );
+}
+
 pub fn collections_by_creator(env: &Env, creator: &Address) -> Vec<CollectionRecord> {
     let count = creator_collection_count(env, creator);
     let mut result = Vec::new(env);
@@ -113,6 +139,22 @@ pub fn all_collections(env: &Env) -> Vec<CollectionRecord> {
     result
 }
 
+pub fn collections_paginated(env: &Env, start: u64, limit: u64) -> Vec<CollectionRecord> {
+    let count = collection_count(env);
+    let mut result = Vec::new(env);
+    let end = (start + limit).min(count);
+    let mut i = start;
+
+    while i < end {
+        if let Some(collection) = collection_by_index(env, i) {
+            result.push_back(collection);
+        }
+        i += 1;
+    }
+
+    result
+}
+
 // Counter for total collections ever deployed through this launchpad.
 pub fn collection_count(env: &Env) -> u64 {
     env.storage()
@@ -128,6 +170,13 @@ pub fn require_admin(env: &Env) -> Result<Address, Error> {
     admin.require_auth();
     Ok(admin)
 }
+/// Get a collection record by its deployed contract address.
+pub fn collection_by_address(env: &Env, address: &Address) -> Option<CollectionRecord> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::CollectionByAddress(address.clone()))
+}
+
 pub fn record_collection(env: &Env, creator: &Address, address: &Address, kind: CollectionKind) {
     let rec = CollectionRecord {
         address: address.clone(),
@@ -171,6 +220,16 @@ pub fn record_collection(env: &Env, creator: &Address, address: &Address, kind: 
     env.storage()
         .persistent()
         .set(&DataKey::CollectionCount, &next);
+
+    // Address-based lookup — allows get_collection_by_id queries
+    env.storage()
+        .persistent()
+        .set(&DataKey::CollectionByAddress(address.clone()), &rec);
+    env.storage().persistent().extend_ttl(
+        &DataKey::CollectionByAddress(address.clone()),
+        TTL_THRESHOLD,
+        TTL_BUMP,
+    );
 }
 
 /// Get a collection by global index.
