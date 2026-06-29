@@ -31,6 +31,8 @@ use crate::{
 #[contract]
 pub struct MarketplaceContract;
 
+const MIN_DURATION_SECONDS: u64 = 60;
+
 #[contractimpl]
 impl MarketplaceContract {
     // ── Admin & Global Configuration ───────────────────────
@@ -545,7 +547,7 @@ impl MarketplaceContract {
             panic_with_error!(&env, MarketplaceError::Unauthorized);
         }
         // A duration of less than a minute is not practical.
-        if duration < 60 {
+        if duration < MIN_DURATION_SECONDS {
             panic_with_error!(&env, MarketplaceError::InvalidAuctionDuration);
         }
 
